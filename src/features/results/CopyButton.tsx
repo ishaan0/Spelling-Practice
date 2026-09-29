@@ -11,8 +11,8 @@ interface CopyButtonProps {
   size?: 'sm' | 'md' | 'lg';
 }
 
-export function CopyButton({ text, label, successMessage, variant = 'secondary', size = 'sm' }: CopyButtonProps) {
-  const { copy, copied, error } = useClipboard();
+export function CopyButton({ text, label, successMessage, variant = 'ghost', size = 'sm' }: CopyButtonProps) {
+  const { copy, copied } = useClipboard();
   const { show } = useToast();
 
   const handleClick = async () => {
@@ -20,7 +20,7 @@ export function CopyButton({ text, label, successMessage, variant = 'secondary',
     if (ok) {
       show(successMessage ?? 'Copied to clipboard', 'success');
     } else {
-      show(`Couldn't copy automatically. ${error ?? ''}`.trim(), 'error');
+      show("Couldn't copy. Your browser blocked access to the clipboard.", 'error');
     }
   };
 
@@ -34,12 +34,12 @@ export function CopyButton({ text, label, successMessage, variant = 'secondary',
     >
       {copied ? (
         <>
-          <Check size={14} aria-hidden="true" className="mr-1.5" />
+          <Check size={14} aria-hidden="true" />
           Copied
         </>
       ) : (
         <>
-          <Copy size={14} aria-hidden="true" className="mr-1.5" />
+          <Copy size={14} aria-hidden="true" />
           {label}
         </>
       )}

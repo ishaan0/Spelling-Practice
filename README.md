@@ -1,32 +1,39 @@
-# React + TypeScript + Vite
+# Spelling Practice
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Practise spelling by ear: add your own words, hear each one read aloud, and type what you hear.
 
-Currently, two official plugins are available:
+Everything runs in the browser. Words, settings and the words you still need to review are
+saved in `localStorage` — there is no server and no account.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Features
 
-## React Compiler
+- **Add words** by typing, pasting or uploading `.txt`, `.csv` or `.json` files
+  (drag and drop works too). Duplicates, list markers (`1.`, `-`, `•`) and blank lines are
+  cleaned up automatically.
+- **Word list** with search, A–Z sorting, undo for removals and export to a text file.
+- **Tests** with a configurable length, optional time limit per word, shuffle, and a choice
+  of accent, voice, speed and pitch.
+- **Feedback** that highlights exactly which letters were wrong.
+- **Review**: words you miss are remembered until you spell them correctly, and can be
+  practised on their own.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Development
 
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
+npm run dev      # start the dev server
+npm test         # run the unit and component tests
+npm run lint     # oxlint
+npm run build    # type-check and build for production
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Built with React, TypeScript, Vite and Tailwind CSS. Speech uses the browser's
+[Web Speech API](https://developer.mozilla.org/en-US/docs/Web/API/SpeechSynthesis), so the
+available voices depend on the browser and operating system.
+
+## Supported file formats
+
+| Format         | Contents                                                          |
+| -------------- | ----------------------------------------------------------------- |
+| `.txt`, `.csv` | Words separated by new lines, commas, semicolons or tabs          |
+| `.json`        | `["word", …]`, `[{ "word": "…" }, …]` or `{ "words": ["word", …] }` |

@@ -1,175 +1,155 @@
-import { useCallback, useRef, useState } from 'react';
-import { Upload, FileText } from 'lucide-react';
-import { Button } from '../../components/Button';
-import { MAX_IMPORT_FILE_SIZE, MAX_WORDS } from '../../utils/constants';
-import { parseWordInput } from './parseWords';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { FileUp } from 'lucide-react';
+import { MAX_IMPORT_FILE_SIZE } from '../../utils/constants';
+import { parseJsonWords, parseWordInput, type ParseResult } from './parseWords';
 
 interface WordImporterProps {
-  onParsed: (result: { words: string[]; message?: string }) => void;
+  onParsed: (result: ParseResult & { fileName: string }) => void;
   onError: (message: string) => void;
 }
 
-const ACCEPTED_EXTENSIONS = ['.txt', '.csv', '.json'];
+const ACCEPTED_EXTENSIONS = ['.txt', '.csv', '.tsv', '.json'];
+
+function hasFiles(e: { dataTransfer: DataTransfer | null }): boolean {
+  return Array.from(e.dataTransfer?.types ?? []).includes('Files');
+}
 
 export function WordImporter({ onParsed, onError }: WordImporterProps) {
   const [isDragging, setIsDragging] = useState(false);
+  const [isReading, setIsReading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // dragenter/dragleave fire for every child element, so count them.
+  const dragDepth = useRef(0);
 
-  const handleFile = useCallback(
+  const readFile = useCallback(
     async (file: File) => {
       if (file.size > MAX_IMPORT_FILE_SIZE) {
         onError(
-          `File is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Max is ${MAX_IMPORT_FILE_SIZE / 1024 / 1024} MB.`,
+          `“${file.name}” is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). The limit is ${MAX_IMPORT_FILE_SIZE / 1024 / 1024} MB.`,
         );
         return;
       }
 
-      const name = file.name.toLowerCase();
-      const ext = name.match(/\.[^.]+$/)?.[0] ?? '';
+      const ext = file.name.toLowerCase().match(/\.[^.]+$/)?.[0] ?? '';
       if (!ACCEPTED_EXTENSIONS.includes(ext)) {
-        onError(`Unsupported file type: ${ext || 'unknown'}. Use .txt, .csv, or .json.`);
+        onError(`“${file.name}” isn't supported. Use a .txt, .csv or .json file.`);
         return;
       }
 
       try {
         const text = await file.text();
-        let words: string[];
-
-        if (ext === '.json') {
-          const jsonWords = parseJsonWords(text);
-          if (jsonWords === null) {
-            onError('This JSON file has an unsupported format.');
-            return;
-          }
-          words = jsonWords;
-        } else {
-          const result = parseWordInput(text);
-          words = result.words;
-        }
-
-        if (words.length === 0) {
-          onError('The file does not contain any usable words.');
-          return;
-        }
-        if (words.length > MAX_WORDS) {
+        const result = ext === '.json' ? parseJsonWords(text) : parseWordInput(text);
+        if (result === null) {
           onError(
-            `File has too many words (${words.length.toLocaleString()}). Max is ${MAX_WORDS.toLocaleString()}.`,
+            `“${file.name}” isn't a word list. Use ["word", …], [{ "word": … }] or { "words": […] }.`,
           );
           return;
         }
-
-        onParsed({ words });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Unable to read this file.';
-        onError(`Unable to read this file. ${msg}`);
+        if (result.words.length === 0) {
+          onError(`“${file.name}” doesn't contain any words.`);
+          return;
+        }
+        onParsed({ ...result, fileName: file.name });
+      } catch {
+        onError(`“${file.name}” couldn't be read.`);
       }
     },
     [onParsed, onError],
   );
 
-  const onSelect = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (file) void handleFile(file);
-      e.target.value = '';
+  const readFiles = useCallback(
+    async (files: FileList | File[]) => {
+      setIsReading(true);
+      try {
+        for (const file of Array.from(files)) {
+          await readFile(file);
+        }
+      } finally {
+        setIsReading(false);
+      }
     },
-    [handleFile],
+    [readFile],
   );
+
+  // A file dropped next to the drop zone would otherwise replace the app with the file.
+  useEffect(() => {
+    const prevent = (e: DragEvent) => {
+      if (hasFiles(e)) e.preventDefault();
+    };
+    window.addEventListener('dragover', prevent);
+    window.addEventListener('drop', prevent);
+    return () => {
+      window.removeEventListener('dragover', prevent);
+      window.removeEventListener('drop', prevent);
+    };
+  }, []);
 
   return (
     <div>
-      <label className="block text-sm font-medium text-slate-700 mb-2">
-        Import file
-      </label>
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => fileInputRef.current?.click()}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            fileInputRef.current?.click();
-          }
+      <input
+        ref={fileInputRef}
+        id="word-file"
+        type="file"
+        multiple
+        accept=".txt,.csv,.tsv,.json,text/plain,text/csv,application/json"
+        onChange={(e) => {
+          const files = e.target.files;
+          if (files && files.length > 0) void readFiles(Array.from(files));
+          // Allow picking the same file again.
+          e.target.value = '';
         }}
-        onDragOver={(e) => {
+        className="sr-only"
+        tabIndex={-1}
+        data-testid="file-input"
+      />
+      <button
+        type="button"
+        onClick={() => fileInputRef.current?.click()}
+        onDragEnter={(e) => {
+          if (!hasFiles(e)) return;
           e.preventDefault();
+          dragDepth.current += 1;
           setIsDragging(true);
         }}
-        onDragLeave={() => setIsDragging(false)}
+        onDragOver={(e) => {
+          if (!hasFiles(e)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+        }}
+        onDragLeave={() => {
+          dragDepth.current = Math.max(0, dragDepth.current - 1);
+          if (dragDepth.current === 0) setIsDragging(false);
+        }}
         onDrop={(e) => {
           e.preventDefault();
+          dragDepth.current = 0;
           setIsDragging(false);
-          const file = e.dataTransfer.files?.[0];
-          if (file) void handleFile(file);
+          if (e.dataTransfer.files.length > 0) void readFiles(e.dataTransfer.files);
         }}
-        className={`flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed p-6 cursor-pointer transition-colors ${
+        disabled={isReading}
+        className={`flex w-full items-center gap-3.5 rounded-xl border-2 border-dashed px-4 py-3.5 text-left transition-colors focus-ring disabled:opacity-60 ${
           isDragging
             ? 'border-accent-500 bg-accent-50'
-            : 'border-slate-300 bg-white hover:border-slate-400'
+            : 'border-slate-300 bg-slate-50/60 hover:border-accent-400 hover:bg-accent-50/40'
         }`}
-        aria-label="Click or drop a file to import words"
       >
-        <Upload size={24} className="text-slate-500" aria-hidden="true" />
-        <p className="text-sm text-slate-700">
-          <span className="font-medium">Click to choose a file</span> or drag and drop
-        </p>
-        <p className="text-xs text-slate-500">.txt, .csv, or .json</p>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".txt,.csv,.json,text/plain,application/json"
-          onChange={onSelect}
-          className="sr-only"
-          data-testid="file-input"
-        />
-      </div>
-      <div className="mt-2">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => fileInputRef.current?.click()}
+        <span
+          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${
+            isDragging ? 'bg-accent-100 text-accent-700' : 'bg-white text-slate-500 shadow-card'
+          }`}
+          aria-hidden="true"
         >
-          <FileText size={16} aria-hidden="true" className="mr-1.5" />
-          Choose file
-        </Button>
-      </div>
+          <FileUp size={20} />
+        </span>
+        <span className="min-w-0">
+          <span className="block text-sm font-medium text-slate-800">
+            {isReading ? 'Reading file…' : isDragging ? 'Drop to add these words' : 'Upload a file'}
+          </span>
+          <span className="block text-xs text-slate-500">
+            Drop a .txt, .csv or .json file here, or click to browse
+          </span>
+        </span>
+      </button>
     </div>
   );
-}
-
-function parseJsonWords(text: string): string[] | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return null;
-  }
-
-  if (Array.isArray(parsed)) {
-    // string[]
-    if (parsed.every((v) => typeof v === 'string')) {
-      return parsed.filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
-    }
-    // Array<{ word: string }>
-    if (
-      parsed.every(
-        (v) => v !== null && typeof v === 'object' && 'word' in v && typeof (v as { word: unknown }).word === 'string',
-      )
-    ) {
-      return parsed
-        .map((v) => (v as { word: string }).word)
-        .filter((w) => w.trim().length > 0);
-    }
-    return null;
-  }
-
-  if (parsed !== null && typeof parsed === 'object' && 'words' in parsed) {
-    const words = (parsed as { words: unknown }).words;
-    if (Array.isArray(words) && words.every((v) => typeof v === 'string')) {
-      return words.filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
-    }
-    return null;
-  }
-
-  return null;
 }

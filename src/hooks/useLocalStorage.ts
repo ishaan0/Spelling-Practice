@@ -1,34 +1,47 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { Dispatch, SetStateAction } from 'react';
 
+/**
+ * State that is mirrored to localStorage.
+ *
+ * - Every change is saved (including the very first one).
+ * - Changes made in another tab are picked up via the `storage` event.
+ * - `onWriteError` is called when the browser refuses to save.
+ */
 export function useLocalStorage<T>(
   key: string,
   read: () => T,
-  write: (value: T) => void,
-): [T, (next: T | ((prev: T) => T)) => void] {
-  const [value, setValue] = useState<T>(() => read());
-  const isFirstWrite = useRef(true);
+  write: (value: T) => boolean | void,
+  onWriteError?: () => void,
+): [T, Dispatch<SetStateAction<T>>] {
+  const [value, setValue] = useState<T>(read);
+  const lastSaved = useRef<T>(value);
+  const onWriteErrorRef = useRef(onWriteError);
 
   useEffect(() => {
-    // Re-sync if the underlying storage changes (rare, but cheap)
-    setValue(read());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+    onWriteErrorRef.current = onWriteError;
+  }, [onWriteError]);
 
-  const update = useCallback(
-    (next: T | ((prev: T) => T)) => {
-      setValue((prev) => {
-        const resolved =
-          typeof next === 'function' ? (next as (p: T) => T)(prev) : next;
-        if (isFirstWrite.current) {
-          isFirstWrite.current = false;
-        } else {
-          write(resolved);
-        }
-        return resolved;
-      });
-    },
-    [write],
-  );
+  // A layout effect, so the value is saved in the same step that puts it on
+  // screen — what the user sees is never ahead of what is stored.
+  useLayoutEffect(() => {
+    // Nothing to do on mount or after syncing from another tab.
+    if (Object.is(lastSaved.current, value)) return;
+    lastSaved.current = value;
+    if (write(value) === false) onWriteErrorRef.current?.();
+  }, [value, write]);
 
-  return [value, update];
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.storageArea !== window.localStorage) return;
+      if (e.key !== null && e.key !== key) return;
+      const next = read();
+      lastSaved.current = next;
+      setValue(next);
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [key, read]);
+
+  return [value, setValue];
 }

@@ -1,12 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Play, Volume2, ChevronDown, ChevronUp } from 'lucide-react';
-import { Card, CardBody, CardHeader } from '../../components/Card';
+import type { ReactNode } from 'react';
+import { ArrowLeft, ChevronDown, Play, TriangleAlert, Volume2 } from 'lucide-react';
+import { Card } from '../../components/Card';
 import { Button } from '../../components/Button';
+import { Choice, ChoiceGroup } from '../../components/ChoiceGroup';
+import { EmptyState } from '../../components/EmptyState';
+import { Switch } from '../../components/Switch';
 import { useApp } from '../../app/AppProvider';
-import { useVoices } from '../../hooks/useVoices';
 import { useSpeechSynthesis } from '../speech/useSpeechSynthesis';
-import { useToast } from '../../components/Toast';
+import { pickVoice, voiceMatchesLanguage } from '../speech/speechService';
 import {
+  DEFAULT_SPEECH_PITCH,
+  DEFAULT_SPEECH_RATE,
   MAX_CUSTOM_TIMER_SECONDS,
   MAX_SPEECH_PITCH,
   MAX_SPEECH_RATE,
@@ -17,90 +22,100 @@ import {
   TEST_LENGTH_PRESETS,
   TIMER_PRESETS_SECONDS,
 } from '../../utils/constants';
+import { countLabel } from '../../utils/pluralize';
 import { shuffle } from '../../utils/shuffle';
+import { formatDuration } from './testUtils';
 
 interface TestSetupProps {
   onStart: (selectedWords: string[]) => void;
 }
 
+// Rough time to hear, type and review one word when there is no time limit.
+const UNTIMED_SECONDS_PER_WORD = 12;
+const VOICE_LOAD_GRACE_MS = 2000;
+
+function parseWholeNumber(text: string): number | null {
+  if (!/^\d+$/.test(text.trim())) return null;
+  return Number.parseInt(text, 10);
+}
+
+function isTimerPreset(seconds: number): boolean {
+  return (TIMER_PRESETS_SECONDS as readonly number[]).includes(seconds);
+}
+
 export function TestSetup({ onStart }: TestSetupProps) {
-  const { words, settings, setSettings, goTo } = useApp();
-  const voices = useVoices();
+  const { words, missedWords, settings, setSettings, goTo, practiceSource, setPracticeSource } =
+    useApp();
   const speech = useSpeechSynthesis();
-  const { show } = useToast();
-  const [voiceOpen, setVoiceOpen] = useState(false);
+  const { voices } = speech;
 
-  const [countMode, setCountMode] = useState<'all' | 'preset' | 'custom'>(() => {
-    if (settings.questionCount === 'all') return 'all';
-    if (typeof settings.questionCount === 'number' && (TEST_LENGTH_PRESETS as readonly number[]).includes(settings.questionCount)) {
-      return 'preset';
-    }
-    return 'custom';
-  });
-  const [customCount, setCustomCount] = useState<string>(() =>
-    typeof settings.questionCount === 'number' && !((TEST_LENGTH_PRESETS as readonly number[]).includes(settings.questionCount))
-      ? String(settings.questionCount)
-      : '25',
+  // ----- Which words -----
+  const reviewWords = useMemo(() => {
+    const missed = new Set(missedWords.map((w) => w.toLowerCase()));
+    return words.filter((w) => missed.has(w.toLowerCase()));
+  }, [words, missedWords]);
+  const source = practiceSource === 'missed' && reviewWords.length > 0 ? 'missed' : 'all';
+  const pool = source === 'missed' ? reviewWords : words;
+  const available = pool.length;
+
+  // ----- How many -----
+  const presets = TEST_LENGTH_PRESETS.filter((n) => n < available);
+  const savedCount = settings.questionCount;
+  const [customCount, setCustomCount] = useState(
+    () =>
+      savedCount !== 'all' &&
+      savedCount <= available &&
+      !(TEST_LENGTH_PRESETS as readonly number[]).includes(savedCount),
   );
-  const [customSeconds, setCustomSeconds] = useState<string>('20');
+  const [customCountText, setCustomCountText] = useState(() =>
+    savedCount === 'all' ? '' : String(savedCount),
+  );
+  const customCountValue = parseWholeNumber(customCountText);
+  const customCountValid =
+    customCountValue !== null && customCountValue >= 1 && customCountValue <= available;
 
-  const selectedCount = useMemo(() => {
-    if (countMode === 'all') return words.length;
-    if (countMode === 'preset') {
-      return typeof settings.questionCount === 'number' ? Math.min(settings.questionCount, words.length) : words.length;
-    }
-    const n = Number.parseInt(customCount, 10);
-    if (!Number.isFinite(n) || n <= 0) return 0;
-    return Math.min(n, words.length);
-  }, [countMode, customCount, settings.questionCount, words.length]);
+  const selectedCount = customCount
+    ? customCountValid
+      ? (customCountValue ?? 0)
+      : 0
+    : savedCount === 'all'
+      ? available
+      : Math.min(savedCount, available);
 
-  const effectiveSecondsPerWord = useMemo(() => {
-    if (!settings.timerEnabled) return 0;
-    return settings.secondsPerWord;
-  }, [settings.timerEnabled, settings.secondsPerWord]);
+  // ----- Time limit -----
+  const [customTimer, setCustomTimer] = useState(() => !isTimerPreset(settings.secondsPerWord));
+  const [customTimerText, setCustomTimerText] = useState(() => String(settings.secondsPerWord));
+  const customTimerValue = parseWholeNumber(customTimerText);
+  const customTimerValid =
+    customTimerValue !== null &&
+    customTimerValue >= MIN_CUSTOM_TIMER_SECONDS &&
+    customTimerValue <= MAX_CUSTOM_TIMER_SECONDS;
+  const timerInvalid = settings.timerEnabled && customTimer && !customTimerValid;
 
-  // Resolve selected voice
-  const resolvedVoice = useMemo(() => {
-    if (!settings.voiceName) return null;
-    const exact = voices.find((v) => v.name === settings.voiceName);
-    if (exact) return exact;
-    const byLang = voices.find((v) => v.lang === settings.language);
-    return byLang ?? null;
-  }, [voices, settings.voiceName, settings.language]);
-
-  // Persist settings changes
+  // ----- Voice -----
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const [voicesSettled, setVoicesSettled] = useState(false);
   useEffect(() => {
-    if (countMode === 'all') {
-      if (settings.questionCount !== 'all') {
-        setSettings((s) => ({ ...s, questionCount: 'all' }));
-      }
-    } else if (countMode === 'preset') {
-      if (typeof settings.questionCount !== 'number' || !((TEST_LENGTH_PRESETS as readonly number[]).includes(settings.questionCount))) {
-        setSettings((s) => ({ ...s, questionCount: 10 }));
-      }
-    } else {
-      const n = Number.parseInt(customCount, 10);
-      if (Number.isFinite(n) && n > 0 && settings.questionCount !== n) {
-        setSettings((s) => ({ ...s, questionCount: n }));
-      }
-    }
-  }, [countMode, customCount, settings.questionCount, setSettings]);
+    const timer = window.setTimeout(() => setVoicesSettled(true), VOICE_LOAD_GRACE_MS);
+    return () => window.clearTimeout(timer);
+  }, []);
 
-  const handleStart = () => {
-    if (words.length === 0) {
-      show('Add some words first.', 'error');
-      return;
-    }
-    const chosen = shuffle(words).slice(0, selectedCount);
-    onStart(chosen);
-  };
+  const languageVoices = useMemo(
+    () => voices.filter((v) => voiceMatchesLanguage(v, settings.language)),
+    [voices, settings.language],
+  );
+  const resolvedVoice = useMemo(
+    () => pickVoice(voices, settings.voiceName, settings.language),
+    [voices, settings.voiceName, settings.language],
+  );
+  const chosenVoiceAvailable =
+    settings.voiceName !== null && voices.some((v) => v.name === settings.voiceName);
+  const languageLabel =
+    SUPPORTED_LANGUAGES.find((l) => l.code === settings.language)?.label ?? settings.language;
+  const noVoices = speech.supported && voicesSettled && voices.length === 0;
 
   const handleTestVoice = () => {
-    if (!speech.supported) {
-      show("Audio pronunciation isn't available in this browser.", 'error');
-      return;
-    }
-    speech.speak('hello', {
+    speech.speak('This is how your words will sound.', {
       voice: resolvedVoice,
       lang: settings.language,
       rate: settings.speechRate,
@@ -108,286 +123,435 @@ export function TestSetup({ onStart }: TestSetupProps) {
     });
   };
 
-  const validTimerSeconds = (n: number): boolean =>
-    Number.isFinite(n) && n >= MIN_CUSTOM_TIMER_SECONDS && n <= MAX_CUSTOM_TIMER_SECONDS;
+  const canStart = speech.supported && selectedCount > 0 && !timerInvalid;
+
+  const handleStart = () => {
+    if (!canStart) return;
+    const ordered = settings.shuffle ? shuffle(pool) : pool;
+    // Without shuffling, a shorter test takes the first words of the list.
+    onStart(ordered.slice(0, selectedCount));
+  };
+
+  if (words.length === 0) {
+    return (
+      <Card className="mx-auto max-w-2xl">
+        <EmptyState
+          title="Add some words first"
+          description="You need at least one word in your list before you can start a test."
+          action={<Button onClick={() => goTo('library')}>Go to your words</Button>}
+        />
+      </Card>
+    );
+  }
+
+  const secondsPerWord = settings.timerEnabled ? settings.secondsPerWord : UNTIMED_SECONDS_PER_WORD;
+  const estimate = formatDuration(selectedCount * secondsPerWord * 1000).replace(/ 0s$/, '');
 
   return (
-    <div className="space-y-6">
+    <div className="mx-auto w-full max-w-3xl space-y-6">
       <header>
-        <h1 className="text-2xl font-semibold text-slate-900">Configure your test</h1>
+        <button
+          type="button"
+          onClick={() => goTo('library')}
+          className="-ml-1 mb-3 inline-flex items-center gap-1 rounded-md px-1 text-sm font-medium text-slate-500 hover:text-slate-900 focus-ring"
+        >
+          <ArrowLeft size={15} aria-hidden="true" />
+          Your words
+        </button>
+        <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Set up your test</h1>
         <p className="mt-1 text-sm text-slate-600">
-          Word library: {words.length} {words.length === 1 ? 'word' : 'words'}
-          {selectedCount > 0 && (
-            <>
-              {' '}· Test length: {selectedCount} {selectedCount === 1 ? 'word' : 'words'}
-            </>
-          )}
+          Each word is read aloud — type what you hear. Your choices are remembered for next time.
         </p>
       </header>
 
-      <Card>
-        <CardHeader>
-          <h2 className="text-lg font-medium text-slate-900">Number of words</h2>
-        </CardHeader>
-        <CardBody className="space-y-3">
-          <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Number of words">
-            <ChoiceButton
-              active={countMode === 'all'}
-              onClick={() => setCountMode('all')}
-              label={`All (${words.length})`}
-            />
-            {TEST_LENGTH_PRESETS.map((n) => (
-              <ChoiceButton
+      {!speech.supported && (
+        <Notice>
+          This browser can't read words aloud, so tests can't run here. Try a current version of
+          Chrome, Edge or Safari.
+        </Notice>
+      )}
+      {noVoices && (
+        <Notice>
+          No voices were found on this device, so you may not hear anything. Use “Test voice” below
+          to check before you start.
+        </Notice>
+      )}
+
+      <Card className="divide-y divide-slate-100">
+        {reviewWords.length > 0 && (
+          <Row title="Words" hint="Practise everything or only what you got wrong.">
+            <ChoiceGroup label="Words to practise">
+              <Choice active={source === 'all'} onSelect={() => setPracticeSource('all')}>
+                All words ({words.length.toLocaleString()})
+              </Choice>
+              <Choice active={source === 'missed'} onSelect={() => setPracticeSource('missed')}>
+                To review ({reviewWords.length.toLocaleString()})
+              </Choice>
+            </ChoiceGroup>
+          </Row>
+        )}
+
+        <Row title="Number of words" hint={`${countLabel(available, 'word')} available.`}>
+          <ChoiceGroup label="Number of words">
+            {presets.map((n) => (
+              <Choice
                 key={n}
-                active={countMode === 'preset' && settings.questionCount === n}
-                onClick={() => {
-                  setCountMode('preset');
+                active={!customCount && selectedCount === n}
+                onSelect={() => {
+                  setCustomCount(false);
                   setSettings((s) => ({ ...s, questionCount: n }));
                 }}
-                label={String(n)}
-                disabled={n > words.length}
-              />
+              >
+                {n}
+              </Choice>
             ))}
-            <ChoiceButton
-              active={countMode === 'custom'}
-              onClick={() => setCountMode('custom')}
-              label="Custom"
-            />
-            {countMode === 'custom' && (
-              <div className="flex items-center gap-2">
-                <input
-                  type="number"
-                  min={1}
-                  max={words.length}
-                  value={customCount}
-                  onChange={(e) => setCustomCount(e.target.value)}
-                  className="w-24 rounded-md border border-slate-300 px-2 py-1 text-sm focus-ring"
-                  aria-label="Custom word count"
-                />
-              </div>
+            <Choice
+              active={!customCount && selectedCount === available}
+              onSelect={() => {
+                setCustomCount(false);
+                setSettings((s) => ({ ...s, questionCount: 'all' }));
+              }}
+            >
+              All ({available.toLocaleString()})
+            </Choice>
+            <Choice
+              active={customCount}
+              onSelect={() => {
+                setCustomCount(true);
+                if (customCountText === '') setCustomCountText(String(selectedCount));
+              }}
+            >
+              Custom
+            </Choice>
+            {customCount && (
+              <input
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={available}
+                value={customCountText}
+                autoFocus
+                onChange={(e) => {
+                  setCustomCountText(e.target.value);
+                  const n = parseWholeNumber(e.target.value);
+                  if (n !== null && n >= 1 && n <= available) {
+                    setSettings((s) => ({ ...s, questionCount: n }));
+                  }
+                }}
+                aria-label="Custom number of words"
+                aria-invalid={!customCountValid}
+                className={`field h-9 w-20 text-center tabular-nums ${customCountValid ? '' : 'field-invalid'}`}
+              />
             )}
-          </div>
-          {selectedCount === 0 && (
-            <p className="text-sm text-red-600">Please choose at least 1 word.</p>
+          </ChoiceGroup>
+          {customCount && !customCountValid && (
+            <FieldError>
+              {available === 1
+                ? 'Only 1 word is available.'
+                : `Enter a number from 1 to ${available.toLocaleString()}.`}
+            </FieldError>
           )}
-        </CardBody>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <h2 className="text-lg font-medium text-slate-900">Time per word</h2>
-        </CardHeader>
-        <CardBody className="space-y-3">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={settings.timerEnabled}
-              onChange={(e) => setSettings((s) => ({ ...s, timerEnabled: e.target.checked }))}
-              className="h-4 w-4 rounded border-slate-300 text-accent-600 focus-ring"
+          <label className="mt-4 flex w-fit cursor-pointer items-center gap-3">
+            <Switch
+              checked={settings.shuffle}
+              onChange={(shuffleOn) => setSettings((s) => ({ ...s, shuffle: shuffleOn }))}
+              label="Shuffle the words"
             />
-            <span className="text-sm text-slate-800">Enable per-word timer</span>
+            <span className="text-sm text-slate-700">Shuffle the words</span>
+          </label>
+        </Row>
+
+        <Row title="Time limit" hint="Counts down once the word has been read out.">
+          <label className="flex w-fit cursor-pointer items-center gap-3">
+            <Switch
+              checked={settings.timerEnabled}
+              onChange={(timerEnabled) => setSettings((s) => ({ ...s, timerEnabled }))}
+              label="Limit the time for each word"
+            />
+            <span className="text-sm text-slate-700">
+              {settings.timerEnabled ? 'Limit the time for each word' : 'No time limit'}
+            </span>
           </label>
           {settings.timerEnabled && (
-            <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Seconds per word">
-              {TIMER_PRESETS_SECONDS.map((s) => (
-                <ChoiceButton
-                  key={s}
-                  active={settings.secondsPerWord === s && !countModeIsCustomTime()}
-                  onClick={() => setSettings((p) => ({ ...p, secondsPerWord: s }))}
-                  label={`${s}s`}
-                />
-              ))}
-              <ChoiceButton
-                active={!TIMER_PRESETS_SECONDS.includes(settings.secondsPerWord as 5 | 10 | 15 | 20 | 30)}
-                onClick={() => setSettings((p) => ({ ...p, secondsPerWord: Number.parseInt(customSeconds, 10) || 20 }))}
-                label="Custom"
-              />
-              {!TIMER_PRESETS_SECONDS.includes(settings.secondsPerWord as 5 | 10 | 15 | 20 | 30) && (
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={MIN_CUSTOM_TIMER_SECONDS}
-                    max={MAX_CUSTOM_TIMER_SECONDS}
-                    value={customSeconds}
-                    onChange={(e) => {
-                      setCustomSeconds(e.target.value);
-                      const n = Number.parseInt(e.target.value, 10);
-                      if (validTimerSeconds(n)) {
-                        setSettings((p) => ({ ...p, secondsPerWord: n }));
-                      }
+            <div className="mt-4">
+              <ChoiceGroup label="Seconds per word">
+                {TIMER_PRESETS_SECONDS.map((s) => (
+                  <Choice
+                    key={s}
+                    active={!customTimer && settings.secondsPerWord === s}
+                    onSelect={() => {
+                      setCustomTimer(false);
+                      setSettings((p) => ({ ...p, secondsPerWord: s }));
                     }}
-                    className="w-24 rounded-md border border-slate-300 px-2 py-1 text-sm focus-ring"
-                    aria-label="Custom seconds per word"
-                  />
-                  <span className="text-xs text-slate-500">sec (3–300)</span>
+                  >
+                    {s}s
+                  </Choice>
+                ))}
+                <Choice
+                  active={customTimer}
+                  onSelect={() => {
+                    setCustomTimer(true);
+                    setCustomTimerText(String(settings.secondsPerWord));
+                  }}
+                >
+                  Custom
+                </Choice>
+                {customTimer && (
+                  <span className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={MIN_CUSTOM_TIMER_SECONDS}
+                      max={MAX_CUSTOM_TIMER_SECONDS}
+                      value={customTimerText}
+                      autoFocus
+                      onChange={(e) => {
+                        setCustomTimerText(e.target.value);
+                        const n = parseWholeNumber(e.target.value);
+                        if (
+                          n !== null &&
+                          n >= MIN_CUSTOM_TIMER_SECONDS &&
+                          n <= MAX_CUSTOM_TIMER_SECONDS
+                        ) {
+                          setSettings((p) => ({ ...p, secondsPerWord: n }));
+                        }
+                      }}
+                      aria-label="Custom seconds per word"
+                      aria-invalid={!customTimerValid}
+                      className={`field h-9 w-20 text-center tabular-nums ${customTimerValid ? '' : 'field-invalid'}`}
+                    />
+                    <span className="text-sm text-slate-500">seconds</span>
+                  </span>
+                )}
+              </ChoiceGroup>
+              {customTimer && !customTimerValid && (
+                <FieldError>
+                  Enter a number from {MIN_CUSTOM_TIMER_SECONDS} to {MAX_CUSTOM_TIMER_SECONDS}.
+                </FieldError>
+              )}
+            </div>
+          )}
+        </Row>
+
+        <Row title="Voice" hint="How the words are read to you.">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="min-w-0 text-sm text-slate-700">
+              <span className="font-medium text-slate-900">{languageLabel}</span>
+              {' · '}
+              {chosenVoiceAvailable ? settings.voiceName : 'Automatic voice'}
+              {' · '}
+              {settings.speechRate.toFixed(2).replace(/\.?0+$/, '')}× speed
+            </p>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleTestVoice}
+                disabled={!speech.supported}
+              >
+                <Volume2 size={15} aria-hidden="true" />
+                Test voice
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setVoiceOpen((v) => !v)}
+                aria-expanded={voiceOpen}
+                aria-controls="voice-options"
+                disabled={!speech.supported}
+              >
+                {voiceOpen ? 'Hide options' : 'Change'}
+                <ChevronDown
+                  size={15}
+                  aria-hidden="true"
+                  className={`transition-transform ${voiceOpen ? 'rotate-180' : ''}`}
+                />
+              </Button>
+            </div>
+          </div>
+
+          {voiceOpen && speech.supported && (
+            <div id="voice-options" className="mt-5 grid grid-cols-1 gap-x-5 gap-y-4 sm:grid-cols-2">
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-slate-700" htmlFor="lang">
+                  Accent
+                </label>
+                <select
+                  id="lang"
+                  value={settings.language}
+                  onChange={(e) =>
+                    // A voice belongs to one accent, so go back to the automatic choice.
+                    setSettings((s) => ({ ...s, language: e.target.value, voiceName: null }))
+                  }
+                  className="field h-10"
+                >
+                  {SUPPORTED_LANGUAGES.map((l) => (
+                    <option key={l.code} value={l.code}>
+                      {l.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-slate-700" htmlFor="voice">
+                  Voice
+                </label>
+                <select
+                  id="voice"
+                  value={chosenVoiceAvailable ? (settings.voiceName ?? '') : ''}
+                  onChange={(e) => setSettings((s) => ({ ...s, voiceName: e.target.value || null }))}
+                  className="field h-10"
+                >
+                  <option value="">
+                    Automatic{resolvedVoice ? ` (${resolvedVoice.name})` : ''}
+                  </option>
+                  {languageVoices.map((v) => (
+                    <option key={`${v.name}|${v.lang}`} value={v.name}>
+                      {v.name} ({v.lang.replace('_', '-')})
+                    </option>
+                  ))}
+                </select>
+                {voices.length === 0 && (
+                  <p className="mt-1.5 text-xs text-slate-500">
+                    {voicesSettled ? 'No voices found on this device.' : 'Loading voices…'}
+                  </p>
+                )}
+              </div>
+
+              <Slider
+                id="rate"
+                label="Speed"
+                value={settings.speechRate}
+                display={`${settings.speechRate.toFixed(2)}×`}
+                min={MIN_SPEECH_RATE}
+                max={MAX_SPEECH_RATE}
+                onChange={(speechRate) => setSettings((s) => ({ ...s, speechRate }))}
+              />
+              <Slider
+                id="pitch"
+                label="Pitch"
+                value={settings.pitch}
+                display={settings.pitch.toFixed(2)}
+                min={MIN_SPEECH_PITCH}
+                max={MAX_SPEECH_PITCH}
+                onChange={(pitch) => setSettings((s) => ({ ...s, pitch }))}
+              />
+
+              {(settings.speechRate !== DEFAULT_SPEECH_RATE ||
+                settings.pitch !== DEFAULT_SPEECH_PITCH) && (
+                <div className="sm:col-span-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSettings((s) => ({
+                        ...s,
+                        speechRate: DEFAULT_SPEECH_RATE,
+                        pitch: DEFAULT_SPEECH_PITCH,
+                      }))
+                    }
+                    className="rounded-md text-sm font-medium text-accent-700 hover:underline focus-ring"
+                  >
+                    Reset speed and pitch
+                  </button>
                 </div>
               )}
             </div>
           )}
-        </CardBody>
-      </Card>
+        </Row>
 
-      <Card>
-        <CardHeader>
-          <button
-            type="button"
-            onClick={() => setVoiceOpen((v) => !v)}
-            className="flex items-center justify-between w-full text-left focus-ring rounded"
-            aria-expanded={voiceOpen}
-          >
-            <h2 className="text-lg font-medium text-slate-900">Voice & pronunciation</h2>
-            {voiceOpen ? <ChevronUp size={18} aria-hidden="true" /> : <ChevronDown size={18} aria-hidden="true" />}
-          </button>
-        </CardHeader>
-        {voiceOpen && (
-          <CardBody className="space-y-4">
-            {!speech.supported ? (
-              <p className="text-sm text-red-600">
-                Audio pronunciation isn't available in this browser. Try a current version of Chrome, Edge, Safari, or another browser with speech synthesis support.
-              </p>
-            ) : (
+        <div className="flex flex-col gap-3 rounded-b-2xl bg-slate-50/60 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+          <p className="text-sm text-slate-600" data-testid="test-summary">
+            {selectedCount > 0 ? (
               <>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1" htmlFor="lang">
-                      Language
-                    </label>
-                    <select
-                      id="lang"
-                      value={settings.language}
-                      onChange={(e) => setSettings((s) => ({ ...s, language: e.target.value }))}
-                      className="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm focus-ring"
-                    >
-                      {SUPPORTED_LANGUAGES.map((l) => (
-                        <option key={l.code} value={l.code}>
-                          {l.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1" htmlFor="voice">
-                      Voice
-                    </label>
-                    <select
-                      id="voice"
-                      value={settings.voiceName ?? ''}
-                      onChange={(e) =>
-                        setSettings((s) => ({ ...s, voiceName: e.target.value || null }))
-                      }
-                      className="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm focus-ring"
-                    >
-                      <option value="">Browser default</option>
-                      {voices
-                        .filter((v) => v.lang.startsWith(settings.language.split('-')[0] ?? 'en'))
-                        .map((v) => (
-                          <option key={v.name} value={v.name}>
-                            {v.name} ({v.lang})
-                          </option>
-                        ))}
-                    </select>
-                    <p className="mt-1 text-xs text-slate-500">
-                      {voices.length === 0 ? 'Loading voices…' : `${voices.length} voices available`}
-                    </p>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1" htmlFor="rate">
-                      Speech rate: {settings.speechRate.toFixed(2)}
-                    </label>
-                    <input
-                      id="rate"
-                      type="range"
-                      min={MIN_SPEECH_RATE}
-                      max={MAX_SPEECH_RATE}
-                      step={0.05}
-                      value={settings.speechRate}
-                      onChange={(e) =>
-                        setSettings((s) => ({ ...s, speechRate: Number.parseFloat(e.target.value) }))
-                      }
-                      className="w-full"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1" htmlFor="pitch">
-                      Pitch: {settings.pitch.toFixed(2)}
-                    </label>
-                    <input
-                      id="pitch"
-                      type="range"
-                      min={MIN_SPEECH_PITCH}
-                      max={MAX_SPEECH_PITCH}
-                      step={0.05}
-                      value={settings.pitch}
-                      onChange={(e) =>
-                        setSettings((s) => ({ ...s, pitch: Number.parseFloat(e.target.value) }))
-                      }
-                      className="w-full"
-                    />
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <Button variant="secondary" size="sm" onClick={handleTestVoice}>
-                    <Volume2 size={14} aria-hidden="true" className="mr-1.5" />
-                    Test voice
-                  </Button>
-                  <p className="text-xs text-slate-500">Speaks "hello" so you can hear the chosen voice.</p>
-                </div>
+                <span className="font-semibold text-slate-900">
+                  {countLabel(selectedCount, 'word')}
+                </span>
+                {' · '}
+                {settings.timerEnabled ? `${settings.secondsPerWord}s each` : 'no time limit'}
+                {' · '}about {estimate}
               </>
+            ) : (
+              'Choose how many words to practise.'
             )}
-          </CardBody>
-        )}
+          </p>
+          <Button size="lg" onClick={handleStart} disabled={!canStart}>
+            <Play size={18} aria-hidden="true" />
+            Start test
+          </Button>
+        </div>
       </Card>
-
-      <div className="flex flex-col-reverse sm:flex-row sm:justify-between gap-3">
-        <Button variant="ghost" onClick={() => goTo('library')}>
-          Back to word library
-        </Button>
-        <Button
-          size="lg"
-          onClick={handleStart}
-          disabled={words.length === 0 || selectedCount === 0}
-        >
-          <Play size={16} aria-hidden="true" className="mr-1.5" />
-          Start test ({selectedCount} {selectedCount === 1 ? 'word' : 'words'}
-          {effectiveSecondsPerWord > 0 && `, ${effectiveSecondsPerWord}s each`})
-        </Button>
-      </div>
     </div>
   );
-
-  function countModeIsCustomTime(): boolean {
-    return !(TIMER_PRESETS_SECONDS as readonly number[]).includes(settings.secondsPerWord);
-  }
 }
 
-function ChoiceButton({
-  active,
-  onClick,
+function Row({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
+  return (
+    <section className="grid grid-cols-1 gap-x-6 gap-y-3 px-5 py-5 sm:grid-cols-[11rem_minmax(0,1fr)] sm:px-6">
+      <div>
+        <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
+        {hint && <p className="mt-0.5 text-xs leading-relaxed text-slate-500">{hint}</p>}
+      </div>
+      <div className="min-w-0">{children}</div>
+    </section>
+  );
+}
+
+function FieldError({ children }: { children: ReactNode }) {
+  return (
+    <p role="alert" className="mt-2 text-sm text-red-600">
+      {children}
+    </p>
+  );
+}
+
+function Notice({ children }: { children: ReactNode }) {
+  return (
+    <div
+      role="alert"
+      className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+    >
+      <TriangleAlert size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+      <p>{children}</p>
+    </div>
+  );
+}
+
+function Slider({
+  id,
   label,
-  disabled,
+  value,
+  display,
+  min,
+  max,
+  onChange,
 }: {
-  active: boolean;
-  onClick: () => void;
+  id: string;
   label: string;
-  disabled?: boolean;
+  value: number;
+  display: string;
+  min: number;
+  max: number;
+  onChange: (value: number) => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      disabled={disabled}
-      className={`h-9 px-3 rounded-md text-sm font-medium border transition-colors focus-ring ${
-        active
-          ? 'bg-accent-600 text-white border-accent-600'
-          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
-      } disabled:opacity-50 disabled:cursor-not-allowed`}
-    >
-      {label}
-    </button>
+    <div>
+      <div className="mb-1.5 flex items-baseline justify-between">
+        <label className="text-sm font-medium text-slate-700" htmlFor={id}>
+          {label}
+        </label>
+        <span className="text-sm tabular-nums text-slate-500">{display}</span>
+      </div>
+      <input
+        id={id}
+        type="range"
+        min={min}
+        max={max}
+        step={0.05}
+        value={value}
+        onChange={(e) => onChange(Number.parseFloat(e.target.value))}
+        className="w-full"
+      />
+    </div>
   );
 }

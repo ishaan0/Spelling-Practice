@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { computeScore, createSession, gradeAnswer, uniqueMistakeWords } from './testUtils';
+import {
+  computeScore,
+  createSession,
+  formatDuration,
+  gradeAnswer,
+  uniqueMistakeWords,
+  updateMissedWords,
+} from './testUtils';
 
 describe('gradeAnswer', () => {
   it('marks correct when normalized answers match (case-insensitive)', () => {
@@ -125,5 +132,54 @@ describe('uniqueMistakeWords', () => {
       gradeAnswer('cherry', 'wrong', 2, 'submitted'),
     ];
     expect(uniqueMistakeWords(s)).toEqual(['apple', 'cherry']);
+  });
+});
+describe('gradeAnswer when skipping', () => {
+  it('never counts a skipped word as correct', () => {
+    const a = gradeAnswer('apple', 'apple', 0, 'skipped');
+    expect(a.status).toBe('incorrect');
+    expect(a.userAnswer).toBe('');
+  });
+});
+
+describe('updateMissedWords', () => {
+  function sessionWith(results: Array<[string, string]>) {
+    const s = createSession({
+      words: results.map(([word]) => word),
+      questionCount: 'all',
+      timerEnabled: false,
+      secondsPerWord: 0,
+      language: 'en-US',
+      voiceName: null,
+      speechRate: 1,
+      pitch: 1,
+    });
+    s.answers = results.map(([word, typed], i) => gradeAnswer(word, typed, i, 'submitted'));
+    return s;
+  }
+
+  const library = ['apple', 'banana', 'cherry', 'grape'];
+
+  it('adds new mistakes and keeps earlier ones that were not tested', () => {
+    const next = updateMissedWords(['grape'], sessionWith([['apple', 'aple']]), library);
+    expect(next).toEqual(['grape', 'apple']);
+  });
+
+  it('clears words that are now spelled correctly', () => {
+    const next = updateMissedWords(['apple', 'grape'], sessionWith([['apple', 'apple']]), library);
+    expect(next).toEqual(['grape']);
+  });
+
+  it('drops words that are no longer in the library', () => {
+    const next = updateMissedWords(['mango'], sessionWith([['apple', 'aple']]), library);
+    expect(next).toEqual(['apple']);
+  });
+});
+
+describe('formatDuration', () => {
+  it('formats seconds and minutes', () => {
+    expect(formatDuration(42_000)).toBe('42s');
+    expect(formatDuration(95_000)).toBe('1m 35s');
+    expect(formatDuration(-5)).toBe('0s');
   });
 });

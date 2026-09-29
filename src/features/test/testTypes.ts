@@ -1,12 +1,12 @@
 export type AnswerStatus = 'correct' | 'incorrect';
 
-export type AnswerReason = 'submitted' | 'timeout';
+export type AnswerReason = 'submitted' | 'timeout' | 'skipped';
 
 export type QuestionStatus =
   | 'idle'
+  /** The word is being read out; the timer has not started yet. */
   | 'speaking'
   | 'answering'
-  | 'grading'
   | 'feedback';
 
 export type TestStatus = 'active' | 'completed' | 'ended-early';

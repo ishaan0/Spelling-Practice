@@ -1,81 +1,73 @@
 import { useEffect, useRef, useState } from 'react';
+import { Timer } from 'lucide-react';
 
 interface TestTimerProps {
-  /** performance.now() ms when the timer should reach zero. Null disables the timer. */
+  /** performance.now() ms when the timer reaches zero. Null while it isn't running. */
   deadlineMs: number | null;
+  /** Full length of the timer, shown before it starts. */
   durationMs: number;
-  /** Called exactly once when the timer expires. */
+  /** Time left when the timer was paused, if it was running. */
+  frozenRemainingMs?: number | null;
+  /** Called once when the timer expires. */
   onExpire: () => void;
-  /** Reset key — bump when starting a new question so the timer resets cleanly. */
-  resetKey: string;
 }
 
-const FRAME_INTERVAL_MS = 100; // ~10 fps
+const TICK_MS = 100;
+const LOW_TIME_MS = 5000;
 
-export function TestTimer({ deadlineMs, durationMs, onExpire, resetKey }: TestTimerProps) {
-  const [remaining, setRemaining] = useState<number>(
-    deadlineMs !== null ? Math.max(0, deadlineMs - performance.now()) : durationMs,
-  );
-  const expiredRef = useRef(false);
-  const rafRef = useRef<number | null>(null);
-  const lastTickRef = useRef<number>(0);
+export function TestTimer({ deadlineMs, durationMs, frozenRemainingMs = null, onExpire }: TestTimerProps) {
+  const [now, setNow] = useState(() => performance.now());
   const onExpireRef = useRef(onExpire);
 
-  // Always invoke the latest onExpire without restarting the loop
+  // Always invoke the latest onExpire without restarting the clock
   useEffect(() => {
     onExpireRef.current = onExpire;
   }, [onExpire]);
 
   useEffect(() => {
     if (deadlineMs === null) return;
-    expiredRef.current = false;
-    setRemaining(Math.max(0, deadlineMs - performance.now()));
-    lastTickRef.current = performance.now();
-
-    const tick = () => {
-      const now = performance.now();
-      const remainingMs = Math.max(0, deadlineMs - now);
-      setRemaining(remainingMs);
-      if (remainingMs <= 0) {
-        if (!expiredRef.current) {
-          expiredRef.current = true;
-          onExpireRef.current();
-        }
-        return;
-      }
-      if (now - lastTickRef.current >= FRAME_INTERVAL_MS) {
-        lastTickRef.current = now;
-      }
-      rafRef.current = window.requestAnimationFrame(tick);
-    };
-
-    rafRef.current = window.requestAnimationFrame(tick);
-
-    return () => {
-      if (rafRef.current !== null) {
-        window.cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
-    };
-  }, [deadlineMs, resetKey]);
-
-  if (deadlineMs === null) {
-    return (
-      <span className="text-sm text-slate-500" aria-label="No time limit">
-        No timer
-      </span>
+    setNow(performance.now());
+    const ticker = window.setInterval(() => setNow(performance.now()), TICK_MS);
+    // A timeout (rather than the display ticker) decides when time is up, so
+    // the question still ends on time in a background tab.
+    const expiry = window.setTimeout(
+      () => onExpireRef.current(),
+      Math.max(0, deadlineMs - performance.now()),
     );
-  }
+    return () => {
+      window.clearInterval(ticker);
+      window.clearTimeout(expiry);
+    };
+  }, [deadlineMs]);
 
-  const totalSeconds = Math.ceil(remaining / 1000);
-  const isLow = totalSeconds <= 5;
+  const running = deadlineMs !== null;
+  const remaining = running
+    ? Math.min(durationMs, Math.max(0, deadlineMs - now))
+    : (frozenRemainingMs ?? durationMs);
+  const seconds = Math.ceil(remaining / 1000);
+  const fraction = durationMs > 0 ? remaining / durationMs : 0;
+  const isLow = running && remaining <= LOW_TIME_MS;
+
   return (
-    <span
-      className={`tabular-nums font-semibold ${isLow ? 'text-amber-600' : 'text-slate-700'}`}
-      aria-live="off"
-      data-testid="timer"
-    >
-      {totalSeconds}s
-    </span>
+    <div className="flex items-center gap-3" data-testid="timer">
+      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
+        <div
+          className={`h-full rounded-full ${isLow ? 'bg-amber-500' : 'bg-accent-400'} ${
+            running ? 'transition-[width] duration-100 ease-linear' : ''
+          }`}
+          style={{ width: `${Math.min(100, Math.max(0, fraction * 100))}%` }}
+        />
+      </div>
+      <span
+        className={`flex w-14 shrink-0 items-center justify-end gap-1 text-sm font-semibold tabular-nums ${
+          isLow ? 'text-amber-600' : 'text-slate-600'
+        }`}
+        role="timer"
+        aria-label={`${seconds} seconds left`}
+      >
+        <Timer size={15} aria-hidden="true" />
+        {seconds}s
+      </span>
+    </div>
   );
 }

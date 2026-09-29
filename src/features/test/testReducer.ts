@@ -10,6 +10,9 @@ export interface TestState {
   lastResult: TestAnswer | null;
   /** Deadline (performance.now ms) for the active timer, if any. */
   deadlineMs: number | null;
+  /** While paused: how much time was left on the timer (null = no timer running). */
+  paused: boolean;
+  pausedRemainingMs: number | null;
 }
 
 export const initialState: TestState = {
@@ -20,6 +23,8 @@ export const initialState: TestState = {
   input: '',
   lastResult: null,
   deadlineMs: null,
+  paused: false,
+  pausedRemainingMs: null,
 };
 
 export type TestAction =
@@ -28,8 +33,14 @@ export type TestAction =
   | { type: 'UPDATE_INPUT'; value: string }
   | { type: 'GRADE'; answer: TestAnswer }
   | { type: 'NEXT' }
+  | { type: 'PAUSE'; nowMs: number }
+  | { type: 'RESUME'; nowMs: number }
   | { type: 'END_EARLY' }
   | { type: 'RESET' };
+
+function isOpenForAnswer(status: QuestionStatus): boolean {
+  return status === 'speaking' || status === 'answering';
+}
 
 export function testReducer(state: TestState, action: TestAction): TestState {
   switch (action.type) {
@@ -37,17 +48,24 @@ export function testReducer(state: TestState, action: TestAction): TestState {
       const s = action.session;
       const first = s.words[0] ?? null;
       return {
+        ...initialState,
         session: s,
         currentWord: first,
         questionId: first ? generateId() : null,
         questionStatus: 'speaking',
-        input: '',
-        lastResult: null,
-        deadlineMs: null,
       };
     }
     case 'SPEECH_STARTED': {
       if (state.questionStatus !== 'speaking') return state;
+      if (state.paused) {
+        // The timer starts counting once the test is resumed.
+        return {
+          ...state,
+          questionStatus: 'answering',
+          pausedRemainingMs:
+            action.deadlineMs === null ? null : Math.max(0, action.deadlineMs - performance.now()),
+        };
+      }
       return {
         ...state,
         questionStatus: 'answering',
@@ -55,16 +73,20 @@ export function testReducer(state: TestState, action: TestAction): TestState {
       };
     }
     case 'UPDATE_INPUT': {
-      if (state.questionStatus !== 'answering') return state;
+      // Typing is allowed as soon as the question is shown, even mid-speech.
+      if (!isOpenForAnswer(state.questionStatus)) return state;
       return { ...state, input: action.value };
     }
     case 'GRADE': {
-      if (state.questionStatus !== 'answering' || !state.session) return state;
+      if (!isOpenForAnswer(state.questionStatus) || !state.session) return state;
+      // Guard against double submits (Enter + timeout in the same frame).
+      if (action.answer.questionIndex !== state.session.currentIndex) return state;
       return {
         ...state,
         questionStatus: 'feedback',
         lastResult: action.answer,
         deadlineMs: null,
+        pausedRemainingMs: null,
         session: {
           ...state.session,
           answers: [...state.session.answers, action.answer],
@@ -72,7 +94,7 @@ export function testReducer(state: TestState, action: TestAction): TestState {
       };
     }
     case 'NEXT': {
-      if (!state.session) return state;
+      if (!state.session || state.questionStatus !== 'feedback') return state;
       const nextIndex = state.session.currentIndex + 1;
       if (nextIndex >= state.session.words.length) {
         return {
@@ -88,6 +110,7 @@ export function testReducer(state: TestState, action: TestAction): TestState {
           questionId: null,
           input: '',
           deadlineMs: null,
+          pausedRemainingMs: null,
         };
       }
       const nextWord = state.session.words[nextIndex] ?? null;
@@ -99,10 +122,31 @@ export function testReducer(state: TestState, action: TestAction): TestState {
         input: '',
         lastResult: null,
         deadlineMs: null,
+        pausedRemainingMs: null,
         session: {
           ...state.session,
           currentIndex: nextIndex,
         },
+      };
+    }
+    case 'PAUSE': {
+      if (state.paused) return state;
+      return {
+        ...state,
+        paused: true,
+        deadlineMs: null,
+        pausedRemainingMs:
+          state.deadlineMs === null ? null : Math.max(0, state.deadlineMs - action.nowMs),
+      };
+    }
+    case 'RESUME': {
+      if (!state.paused) return state;
+      return {
+        ...state,
+        paused: false,
+        deadlineMs:
+          state.pausedRemainingMs === null ? null : action.nowMs + state.pausedRemainingMs,
+        pausedRemainingMs: null,
       };
     }
     case 'END_EARLY': {
@@ -110,6 +154,7 @@ export function testReducer(state: TestState, action: TestAction): TestState {
       return {
         ...state,
         questionStatus: 'idle',
+        paused: false,
         session: {
           ...state.session,
           status: 'ended-early',
@@ -119,6 +164,7 @@ export function testReducer(state: TestState, action: TestAction): TestState {
         questionId: null,
         input: '',
         deadlineMs: null,
+        pausedRemainingMs: null,
       };
     }
     case 'RESET': {

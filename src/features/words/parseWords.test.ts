@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseWordInput } from './parseWords';
+import { parseJsonWords, parseWordInput } from './parseWords';
 
 describe('parseWordInput', () => {
   it('splits on newlines, commas, tabs, and semicolons', () => {
@@ -53,5 +53,40 @@ describe('parseWordInput', () => {
   it('handles mixed separators', () => {
     const r = parseWordInput('one;two,three\nfour\tfive;six');
     expect(r.words).toEqual(['one', 'two', 'three', 'four', 'five', 'six']);
+  });
+});
+describe('parseWordInput clean-up', () => {
+  it('strips a byte-order mark and handles Windows / old Mac line endings', () => {
+    const r = parseWordInput('﻿apple\r\nbanana\rcherry');
+    expect(r.words).toEqual(['apple', 'banana', 'cherry']);
+  });
+
+  it('strips list markers and wrapping quotes', () => {
+    const r = parseWordInput('1. apple\n2) banana\n- cherry\n• grape\n"New York"');
+    expect(r.words).toEqual(['apple', 'banana', 'cherry', 'grape', 'New York']);
+  });
+
+  it('keeps leading hyphens that are part of the word', () => {
+    expect(parseWordInput('-ing').words).toEqual(['-ing']);
+  });
+
+  it('skips entries that are too long to be a word', () => {
+    const r = parseWordInput(`apple\n${'x'.repeat(80)}`);
+    expect(r.words).toEqual(['apple']);
+    expect(r.tooLongIgnored).toBe(1);
+  });
+});
+
+describe('parseJsonWords', () => {
+  it('accepts arrays of strings, arrays of objects and { words }', () => {
+    expect(parseJsonWords('["apple", " banana "]')?.words).toEqual(['apple', 'banana']);
+    expect(parseJsonWords('[{"word":"apple"},{"word":"Apple"}]')?.words).toEqual(['apple']);
+    expect(parseJsonWords('{"words":["apple","cherry"]}')?.words).toEqual(['apple', 'cherry']);
+  });
+
+  it('rejects invalid or unsupported JSON', () => {
+    expect(parseJsonWords('not json')).toBeNull();
+    expect(parseJsonWords('{"items":["a"]}')).toBeNull();
+    expect(parseJsonWords('[1, 2, 3]')).toBeNull();
   });
 });

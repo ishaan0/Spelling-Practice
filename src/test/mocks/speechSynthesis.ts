@@ -28,9 +28,14 @@ let speakingNow = false;
 
 export function __installSpeechSynthesisMock() {
   if (typeof window === 'undefined') return;
+  queue.length = 0;
+  speakingNow = false;
 
   const fakeClass = class {
-    text = '';
+    text: string;
+    constructor(text = '') {
+      this.text = text;
+    }
     voice: SpeechSynthesisVoice | null = null;
     lang = '';
     rate = 1;

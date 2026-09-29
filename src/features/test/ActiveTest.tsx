@@ -1,368 +1,371 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { Volume2, X } from 'lucide-react';
+import { ArrowRight, CornerDownLeft, Volume2, X } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { Dialog } from '../../components/Dialog';
 import { useApp } from '../../app/AppProvider';
 import { useSpeechSynthesis } from '../speech/useSpeechSynthesis';
-import { useVoices } from '../../hooks/useVoices';
+import { pickVoice } from '../speech/speechService';
 import { TestProgress } from './TestProgress';
 import { TestTimer } from './TestTimer';
 import { AnswerInput } from './AnswerInput';
 import { AnswerFeedback } from './AnswerFeedback';
-import { computeScore, createSession, gradeAnswer, uniqueMistakeWords } from './testUtils';
+import { createSession, gradeAnswer } from './testUtils';
 import { initialState, testReducer } from './testReducer';
-import {
-  FEEDBACK_DELAY_CORRECT_MS,
-  FEEDBACK_DELAY_INCORRECT_MS,
-} from '../../utils/constants';
+import type { AnswerReason, TestSession } from './testTypes';
+import { FEEDBACK_DELAY_CORRECT_MS, SPEECH_START_FALLBACK_MS } from '../../utils/constants';
+import { countLabel } from '../../utils/pluralize';
 
 interface ActiveTestProps {
   initialWords: string[];
-  onComplete: (summary: {
-    session: ReturnType<typeof computeScore>;
-    words: string[];
-    answers: import('./testTypes').TestAnswer[];
-    status: 'completed' | 'ended-early';
-    mistakeWords: string[];
-  }) => void;
+  /** Called once with the finished (or ended-early) session. */
+  onComplete: (session: TestSession) => void;
+  /** Called when the test is abandoned before anything was answered. */
   onExit: () => void;
 }
 
+type AudioIssue = 'not-started' | 'failed';
+
 export function ActiveTest({ initialWords, onComplete, onExit }: ActiveTestProps) {
-  const { settings, setLastResult, setMistakeWords } = useApp();
-  const [state, dispatch] = useReducer(testReducer, initialState);
-  const speech = useSpeechSynthesis();
-  const voices = useVoices();
+  const { settings } = useApp();
+  // The settings a test starts with apply until it ends.
+  const [testSettings] = useState(settings);
+  const [state, dispatch] = useReducer(testReducer, undefined, () =>
+    testReducer(initialState, {
+      type: 'START',
+      session: createSession({
+        words: initialWords,
+        questionCount: initialWords.length,
+        timerEnabled: testSettings.timerEnabled,
+        secondsPerWord: testSettings.secondsPerWord,
+        language: testSettings.language,
+        voiceName: testSettings.voiceName,
+        speechRate: testSettings.speechRate,
+        pitch: testSettings.pitch,
+      }),
+    }),
+  );
+  const { supported, voices, speaking, speak, cancel } = useSpeechSynthesis();
 
   const [showEndConfirm, setShowEndConfirm] = useState(false);
-  const [speechError, setSpeechError] = useState<string | null>(null);
+  const [audioIssue, setAudioIssue] = useState<AudioIssue | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Refs for race-condition guards
+  // Guards against callbacks that arrive for a question that is already over.
   const activeQuestionIdRef = useRef<string | null>(null);
-  const hasTimerStartedRef = useRef(false);
-  const autoAdvanceTimer = useRef<number | null>(null);
+  const timerArmedRef = useRef(false);
+  const completedRef = useRef(false);
 
-  // Resolve voice
-  const resolvedVoice = useMemo(() => {
-    if (!settings.voiceName) return null;
-    const exact = voices.find((v) => v.name === settings.voiceName);
-    if (exact) return exact;
-    return voices.find((v) => v.lang === settings.language) ?? null;
-  }, [voices, settings.voiceName, settings.language]);
+  const durationMs = testSettings.timerEnabled ? testSettings.secondsPerWord * 1000 : 0;
 
-  // Initialize the test once on mount.
-  useEffect(() => {
-    if (!speech.supported) {
-      // Render an explicit message but still build a session so user can read instructions.
-      // We let them continue without audio — but the spec says do not silently run audio test
-      // without audio. We surface a banner instead.
-    }
-    const session = createSession({
-      words: initialWords,
-      questionCount: initialWords.length,
-      timerEnabled: settings.timerEnabled,
-      secondsPerWord: settings.secondsPerWord,
-      language: settings.language,
-      voiceName: settings.voiceName,
-      speechRate: settings.speechRate,
-      pitch: settings.pitch,
-    });
-    dispatch({ type: 'START', session });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const voice = useMemo(
+    () => pickVoice(voices, testSettings.voiceName, testSettings.language),
+    [voices, testSettings.voiceName, testSettings.language],
+  );
 
-  // Cancel speech + clear timers on unmount
-  useEffect(() => {
-    return () => {
-      speech.cancel();
-      if (autoAdvanceTimer.current !== null) {
-        window.clearTimeout(autoAdvanceTimer.current);
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Speak the current word when the question enters 'speaking' state.
-  useEffect(() => {
-    if (state.questionStatus !== 'speaking' || !state.currentWord) return;
-
-    activeQuestionIdRef.current = state.questionId;
-    hasTimerStartedRef.current = false;
-    setSpeechError(null);
-
-    if (!speech.supported) {
-      // No speech support — show banner, but allow them to submit.
-      // We don't auto-advance the timer; user must submit manually.
-      // Bypass speaking state to allow answering immediately.
-      // Dispatch SPEECH_STARTED with null deadline to allow manual input.
-      // But our reducer transitions speaking -> answering only via SPEECH_STARTED.
-      // Simulate "started" without a deadline.
-      // (Visually this means the timer never appears.)
-      // No-op here: user clicks Submit; if timer is disabled, deadlineMs is null.
-      // Use an immediate manual-start path:
+  /** Opens the question for answering and starts its timer — once per question. */
+  const armTimer = useCallback(
+    (questionId: string) => {
+      if (activeQuestionIdRef.current !== questionId || timerArmedRef.current) return;
+      timerArmedRef.current = true;
       dispatch({
         type: 'SPEECH_STARTED',
-        deadlineMs: settings.timerEnabled
-          ? performance.now() + settings.secondsPerWord * 1000
-          : null,
+        deadlineMs: durationMs > 0 ? performance.now() + durationMs : null,
       });
-      return;
-    }
+    },
+    [durationMs],
+  );
 
-    speech.speak(state.currentWord, {
-      voice: resolvedVoice,
-      lang: settings.language,
-      rate: settings.speechRate,
-      pitch: settings.pitch,
-      onStart: () => {
-        // Only arm the timer once per question (replay should not reset it).
-        if (activeQuestionIdRef.current !== state.questionId) return;
-        if (hasTimerStartedRef.current) return;
-        hasTimerStartedRef.current = true;
-        const deadline = settings.timerEnabled
-          ? performance.now() + settings.secondsPerWord * 1000
-          : null;
-        dispatch({ type: 'SPEECH_STARTED', deadlineMs: deadline });
-      },
-      onEnd: () => {
-        // No-op: the question remains in 'answering' until submit/timeout.
-      },
-      onError: (err) => {
-        // Only report errors for the active question
-        if (activeQuestionIdRef.current !== state.questionId) return;
-        const message =
-          err && typeof err === 'object' && 'error' in err
-            ? String((err as SpeechSynthesisErrorEvent).error)
-            : "We couldn't play this word.";
-        setSpeechError(message);
-      },
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.questionId]);
+  const speakWord = useCallback(
+    (word: string, questionId: string) => {
+      speak(word, {
+        voice,
+        lang: testSettings.language,
+        rate: testSettings.speechRate,
+        pitch: testSettings.pitch,
+        onStart: () => {
+          if (activeQuestionIdRef.current !== questionId) return;
+          setAudioIssue(null);
+          armTimer(questionId);
+        },
+        onError: () => {
+          if (activeQuestionIdRef.current !== questionId) return;
+          setAudioIssue('failed');
+          armTimer(questionId);
+        },
+      });
+    },
+    [speak, voice, testSettings.language, testSettings.speechRate, testSettings.pitch, armTimer],
+  );
 
-  // Auto-advance after feedback delay
+  // Read each new word out loud. If the browser never starts speaking, open
+  // the question anyway so the test can't get stuck.
+  const speakWordRef = useRef(speakWord);
   useEffect(() => {
-    if (state.questionStatus !== 'feedback' || !state.lastResult) return;
+    speakWordRef.current = speakWord;
+  }, [speakWord]);
 
-    const delay =
-      state.lastResult.status === 'correct'
-        ? FEEDBACK_DELAY_CORRECT_MS
-        : FEEDBACK_DELAY_INCORRECT_MS;
-
-    autoAdvanceTimer.current = window.setTimeout(() => {
-      autoAdvanceTimer.current = null;
-      dispatch({ type: 'NEXT' });
-    }, delay);
-
-    return () => {
-      if (autoAdvanceTimer.current !== null) {
-        window.clearTimeout(autoAdvanceTimer.current);
-        autoAdvanceTimer.current = null;
-      }
-    };
-  }, [state.questionStatus, state.lastResult]);
-
-  // Watch for test completion
   useEffect(() => {
-    if (!state.session) return;
-    if (state.session.status === 'completed' || state.session.status === 'ended-early') {
-      const summary = computeScore(state.session);
-      const mistakes = uniqueMistakeWords(state.session);
-      setLastResult({
-        id: state.session.id,
-        finishedAt: state.session.endedAt ?? Date.now(),
-        totalAnswered: summary.totalAnswered,
-        correctCount: summary.correct,
-        incorrectCount: summary.incorrect,
-        accuracy: summary.accuracy,
-      });
-      setMistakeWords(mistakes);
-      onComplete({
-        session: summary,
-        words: state.session.words,
-        answers: state.session.answers,
-        status: state.session.status,
-        mistakeWords: mistakes,
-      });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.session?.status]);
+    const questionId = state.questionId;
+    const word = state.currentWord;
+    if (!questionId || word === null) return;
 
-  const handleSubmit = useCallback(() => {
-    if (!state.session || state.currentWord === null) return;
-    if (state.questionStatus !== 'answering') return;
-    const answer = gradeAnswer(
-      state.currentWord,
-      state.input,
-      state.session.currentIndex,
-      'submitted',
-    );
-    dispatch({ type: 'GRADE', answer });
-    speech.cancel();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.session, state.currentWord, state.input, state.questionStatus]);
+    activeQuestionIdRef.current = questionId;
+    timerArmedRef.current = false;
+    setAudioIssue(null);
+    speakWordRef.current(word, questionId);
 
-  const handleTimeout = useCallback(() => {
-    if (!state.session || state.currentWord === null) return;
-    if (state.questionStatus !== 'answering') return;
-    const answer = gradeAnswer(
-      state.currentWord,
-      state.input,
-      state.session.currentIndex,
-      'timeout',
-    );
-    dispatch({ type: 'GRADE', answer });
-    speech.cancel();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.session, state.currentWord, state.input, state.questionStatus]);
+    const fallback = window.setTimeout(() => {
+      if (activeQuestionIdRef.current !== questionId || timerArmedRef.current) return;
+      setAudioIssue('not-started');
+      armTimer(questionId);
+    }, SPEECH_START_FALLBACK_MS);
+    return () => window.clearTimeout(fallback);
+  }, [state.questionId, state.currentWord, armTimer]);
 
-  const handleReplay = () => {
-    if (!state.currentWord) return;
-    if (!speech.supported) {
-      setSpeechError("We couldn't play this word.");
-      return;
-    }
-    // Cancel any in-flight speech, then replay. Do NOT touch hasTimerStartedRef.
-    speech.cancel();
-    // Small delay so the cancel completes in the browser before speaking again
-    window.setTimeout(() => {
-      if (activeQuestionIdRef.current !== state.questionId) return;
-      speech.speak(state.currentWord!, {
-        voice: resolvedVoice,
-        lang: settings.language,
-        rate: settings.speechRate,
-        pitch: settings.pitch,
+  // Correct answers move on by themselves; mistakes wait so they can be studied.
+  useEffect(() => {
+    if (state.questionStatus !== 'feedback' || state.paused) return;
+    if (state.lastResult?.status !== 'correct') return;
+    const timer = window.setTimeout(() => dispatch({ type: 'NEXT' }), FEEDBACK_DELAY_CORRECT_MS);
+    return () => window.clearTimeout(timer);
+  }, [state.questionStatus, state.lastResult, state.paused]);
+
+  // Clicking Check / Skip / Next moves focus to a button that then disappears.
+  // Bring it back to the answer box so typing and Enter keep working.
+  useEffect(() => {
+    if (showEndConfirm) return;
+    inputRef.current?.focus();
+  }, [state.questionStatus, state.questionId, showEndConfirm]);
+
+  // Hand the session over when the test is finished.
+  const session = state.session;
+  useEffect(() => {
+    if (!session || session.status === 'active' || completedRef.current) return;
+    completedRef.current = true;
+    onComplete(session);
+  }, [session, onComplete]);
+
+  const grade = useCallback(
+    (reason: AnswerReason) => {
+      if (!state.session || state.currentWord === null) return;
+      if (state.questionStatus !== 'speaking' && state.questionStatus !== 'answering') return;
+      cancel();
+      dispatch({
+        type: 'GRADE',
+        answer: gradeAnswer(state.currentWord, state.input, state.session.currentIndex, reason),
       });
-    }, 50);
+    },
+    [state.session, state.currentWord, state.input, state.questionStatus, cancel],
+  );
+
+  const handleTimeout = useCallback(() => grade('timeout'), [grade]);
+
+  const handleReplay = useCallback(() => {
+    if (state.currentWord === null || !state.questionId) return;
+    speakWord(state.currentWord, state.questionId);
+    inputRef.current?.focus();
+  }, [state.currentWord, state.questionId, speakWord]);
+
+  const isFeedback = state.questionStatus === 'feedback';
+
+  const handleEnter = () => {
+    if (isFeedback) dispatch({ type: 'NEXT' });
+    else if (state.input.trim().length === 0) handleReplay();
+    else grade('submitted');
   };
 
-  const handleEnd = () => setShowEndConfirm(true);
-  const handleConfirmEnd = () => {
-    speech.cancel();
-    if (autoAdvanceTimer.current !== null) {
-      window.clearTimeout(autoAdvanceTimer.current);
-      autoAdvanceTimer.current = null;
-    }
+  const openEndConfirm = () => {
+    dispatch({ type: 'PAUSE', nowMs: performance.now() });
+    setShowEndConfirm(true);
+  };
+
+  const closeEndConfirm = () => {
     setShowEndConfirm(false);
+    dispatch({ type: 'RESUME', nowMs: performance.now() });
+  };
+
+  const confirmEnd = () => {
+    cancel();
+    setShowEndConfirm(false);
+    if (!state.session || state.session.answers.length === 0) {
+      onExit();
+      return;
+    }
     dispatch({ type: 'END_EARLY' });
   };
 
-  if (!state.session) {
-    return (
-      <div className="text-center text-slate-600 py-10">Preparing your test…</div>
-    );
-  }
+  if (!state.session) return null;
 
   const totalQuestions = state.session.words.length;
-  const questionNumber = Math.min(state.session.currentIndex + 1, totalQuestions);
-  const isFeedback = state.questionStatus === 'feedback';
-  const isAnswering = state.questionStatus === 'answering';
+  const answered = state.session.answers.length;
   const correctCount = state.session.answers.filter((a) => a.status === 'correct').length;
-  const incorrectCount = state.session.answers.length - correctCount;
+  const isLastQuestion = state.session.currentIndex >= totalQuestions - 1;
+  const hasInput = state.input.trim().length > 0;
 
   return (
-    <div className="space-y-6">
-      <header className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-slate-900">Spelling Practice</h1>
-        <Button variant="ghost" size="sm" onClick={handleEnd}>
-          <X size={14} aria-hidden="true" className="mr-1" />
+    <div className="mx-auto w-full max-w-2xl space-y-5">
+      <div className="flex items-center justify-between gap-4">
+        <h1 className="text-xl font-semibold tracking-tight text-slate-900">Spelling test</h1>
+        <Button variant="secondary" size="sm" onClick={openEndConfirm}>
+          <X size={15} aria-hidden="true" />
           End test
         </Button>
-      </header>
+      </div>
 
       <TestProgress
         currentIndex={state.session.currentIndex}
+        answered={answered}
         total={totalQuestions}
         correct={correctCount}
-        incorrect={incorrectCount}
+        incorrect={answered - correctCount}
       />
 
-      <div className="flex items-center justify-between text-sm text-slate-600">
-        <span className="font-medium text-slate-800">Question {questionNumber}</span>
-        <TestTimer
-          deadlineMs={state.deadlineMs}
-          durationMs={settings.timerEnabled ? settings.secondsPerWord * 1000 : 0}
-          onExpire={handleTimeout}
-          resetKey={state.questionId ?? 'none'}
-        />
-      </div>
+      <section
+        aria-label="Current word"
+        className="rounded-2xl border border-slate-200 bg-white p-5 shadow-card sm:p-8"
+      >
+        {durationMs > 0 && (
+          <div className={`mb-6 ${isFeedback ? 'invisible' : ''}`}>
+            <TestTimer
+              deadlineMs={state.deadlineMs}
+              durationMs={durationMs}
+              frozenRemainingMs={state.pausedRemainingMs}
+              onExpire={handleTimeout}
+            />
+          </div>
+        )}
 
-      <div className="rounded-xl bg-white border border-slate-200 shadow-sm p-6 sm:p-10">
         <div className="flex flex-col items-center gap-6">
-          <button
-            type="button"
-            onClick={handleReplay}
-            aria-label="Listen to the word again"
-            className="flex flex-col items-center gap-2 text-slate-700 hover:text-accent-700 focus-ring rounded-lg p-3"
-            data-testid="replay-btn"
-          >
-            <span className="rounded-full bg-accent-50 text-accent-700 p-4 border border-accent-100">
-              <Volume2 size={32} aria-hidden="true" />
+          <div className="flex flex-col items-center gap-2">
+            <button
+              type="button"
+              onClick={handleReplay}
+              // Keep the caret in the answer field when the speaker is clicked.
+              onMouseDown={(e) => e.preventDefault()}
+              disabled={!supported}
+              aria-label="Listen to the word again"
+              className="group relative flex h-20 w-20 items-center justify-center rounded-full bg-accent-600 text-white shadow-md transition hover:bg-accent-700 active:scale-95 focus-ring disabled:bg-slate-300"
+              data-testid="replay-btn"
+            >
+              {speaking && (
+                <span
+                  className="absolute inset-0 rounded-full bg-accent-400 animate-sound-ring"
+                  aria-hidden="true"
+                />
+              )}
+              <Volume2 size={34} className="relative" aria-hidden="true" />
+            </button>
+            <span className="text-sm font-medium text-slate-600">
+              {speaking ? 'Listen…' : 'Listen again'}
             </span>
-            <span className="text-sm font-medium">Listen again</span>
-          </button>
+          </div>
 
-          {!speech.supported && (
-            <div
-              role="alert"
-              className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 w-full"
-            >
-              Audio pronunciation isn't available in this browser. Try a current version of Chrome, Edge, Safari, or another browser with speech synthesis support. You can still type your answer below.
+          {/* The answer box and its buttons stay put; anything that comes and
+              goes (feedback, audio notices) is shown underneath them. */}
+          <div className="flex w-full flex-col gap-3">
+            <AnswerInput
+              value={state.input}
+              onChange={(value) => dispatch({ type: 'UPDATE_INPUT', value })}
+              onEnter={handleEnter}
+              locked={isFeedback}
+              result={isFeedback ? (state.lastResult?.status ?? null) : null}
+              inputRef={inputRef}
+            />
+
+            <div className="flex w-full items-center justify-between gap-2">
+              {isFeedback ? (
+                <>
+                  <span className="hidden text-xs text-slate-500 sm:block">
+                    Press <Kbd>Enter</Kbd> to continue
+                  </span>
+                  <Button
+                    size="lg"
+                    onClick={() => dispatch({ type: 'NEXT' })}
+                    className="flex-1 sm:min-w-[10rem] sm:flex-none"
+                    data-testid="next-btn"
+                  >
+                    {isLastQuestion ? 'See results' : 'Next word'}
+                    <ArrowRight size={18} aria-hidden="true" />
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button
+                    variant="ghost"
+                    size="lg"
+                    onClick={() => grade('skipped')}
+                    className="px-4"
+                    data-testid="skip-btn"
+                  >
+                    I don't know
+                  </Button>
+                  <Button
+                    size="lg"
+                    onClick={() => grade('submitted')}
+                    disabled={!hasInput}
+                    className="flex-1 sm:min-w-[10rem] sm:flex-none"
+                    data-testid="submit-btn"
+                  >
+                    Check
+                    <CornerDownLeft size={18} aria-hidden="true" />
+                  </Button>
+                </>
+              )}
             </div>
-          )}
-
-          {speechError && (
-            <div
-              role="alert"
-              className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-800 w-full flex items-center justify-between gap-2"
-            >
-              <span>We couldn't play this word.</span>
-              <Button variant="secondary" size="sm" onClick={handleReplay}>
-                Try again
-              </Button>
-            </div>
-          )}
-
-          <AnswerInput
-            value={state.input}
-            onChange={(v) => dispatch({ type: 'UPDATE_INPUT', value: v })}
-            onSubmit={handleSubmit}
-            disabled={!isAnswering}
-            inputRef={inputRef}
-          />
+          </div>
 
           <AnswerFeedback answer={state.lastResult} questionStatus={state.questionStatus} />
 
-          {!isFeedback && (
-            <p className="text-xs text-slate-500">
-              The word will be spoken automatically. Click "Listen again" to replay.
-            </p>
+          {(!supported || audioIssue) && (
+            <div
+              role="alert"
+              className="flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+            >
+              <span>
+                {!supported
+                  ? "This browser can't read words aloud. Try Chrome, Edge or Safari."
+                  : audioIssue === 'failed'
+                    ? "The word couldn't be played."
+                    : "The audio didn't start. Check that your sound is on."}
+              </span>
+              {supported && (
+                <Button variant="secondary" size="sm" onClick={handleReplay}>
+                  Play again
+                </Button>
+              )}
+            </div>
           )}
         </div>
-      </div>
+      </section>
 
-      <div className="flex justify-center">
-        <Button variant="ghost" onClick={onExit} size="sm">
-          Back to word library
-        </Button>
-      </div>
+      {!isFeedback && (
+        <p className="hidden text-center text-xs text-slate-500 sm:block">
+          <Kbd>Enter</Kbd> checks your answer · <Kbd>Enter</Kbd> on an empty box plays the word again
+        </p>
+      )}
 
       <Dialog
         open={showEndConfirm}
         title="End this test?"
         description={
-          <>
-            You have completed {state.session.answers.length} of {totalQuestions} words.
-            Future questions will not be counted as incorrect.
-          </>
+          answered === 0
+            ? "You haven't answered any words yet, so there won't be any results."
+            : `You've answered ${answered} of ${countLabel(totalQuestions, 'word')}. The words you haven't reached won't count against you.`
         }
         confirmLabel="End test"
         confirmVariant="danger"
         cancelLabel="Keep practicing"
-        onConfirm={handleConfirmEnd}
-        onCancel={() => setShowEndConfirm(false)}
+        onConfirm={confirmEnd}
+        onCancel={closeEndConfirm}
       />
     </div>
+  );
+}
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="rounded border border-slate-300 bg-white px-1.5 py-0.5 font-sans text-[11px] font-medium text-slate-600 shadow-sm">
+      {children}
+    </kbd>
   );
 }

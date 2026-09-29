@@ -6,6 +6,7 @@ export interface SpeakOptions {
   volume?: number;
   onStart?: () => void;
   onEnd?: () => void;
+  /** Real playback failures only — being cancelled or replaced is not an error. */
   onError?: (error: unknown) => void;
 }
 

@@ -15,8 +15,8 @@ export interface UseSpeechSynthesisResult {
  * Thin React wrapper over the browser speechSynthesis API.
  *
  * Notes:
- *  - Calls `onStart`/`onEnd` from the underlying utterance events.
- *  - `cancel()` is exposed for cleanup.
+ *  - `speak` and `cancel` are stable, so they are safe in effect dependencies.
+ *  - Speech is cancelled when the component unmounts.
  *  - `voices` is populated from `useVoices()` which listens to `voiceschanged`.
  */
 export function useSpeechSynthesis(): UseSpeechSynthesisResult {
@@ -31,23 +31,19 @@ export function useSpeechSynthesis(): UseSpeechSynthesisResult {
   }, []);
 
   const wrappedSpeak = useCallback((text: string, options: SpeakOptions = {}) => {
-    const onStart = options.onStart;
-    const onEnd = options.onEnd;
-    const onError = options.onError;
-
     speak(text, {
       ...options,
       onStart: () => {
         setSpeaking(true);
-        onStart?.();
+        options.onStart?.();
       },
       onEnd: () => {
         setSpeaking(false);
-        onEnd?.();
+        options.onEnd?.();
       },
       onError: (err) => {
         setSpeaking(false);
-        onError?.(err);
+        options.onError?.(err);
       },
     });
   }, []);

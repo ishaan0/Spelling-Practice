@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { TestResults } from './TestResults';
@@ -46,9 +46,9 @@ describe('TestResults', () => {
   it('renders the summary counts and accuracy', () => {
     renderResults(makeSession());
     expect(screen.getByText(/Test complete/i)).toBeInTheDocument();
-    expect(screen.getByText('2')).toBeInTheDocument(); // Correct
-    expect(screen.getByText('1')).toBeInTheDocument(); // Incorrect
-    expect(screen.getByText('67%')).toBeInTheDocument();
+    expect(screen.getByTestId('stat-correct')).toHaveTextContent('2');
+    expect(screen.getByTestId('stat-incorrect')).toHaveTextContent('1');
+    expect(screen.getByTestId('stat-accuracy')).toHaveTextContent('67%');
   });
 
   it('shows correct word chips', () => {
@@ -60,7 +60,28 @@ describe('TestResults', () => {
   it('shows incorrect entries with user answer and correct spelling', () => {
     renderResults(makeSession());
     expect(screen.getByText('bannana')).toBeInTheDocument();
-    expect(screen.getByText('banana')).toBeInTheDocument();
+    // Present twice: once for screen readers, once with the letters highlighted.
+    expect(screen.getAllByText('banana').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: /listen to banana/i })).toBeInTheDocument();
+  });
+
+  it('starts a new test with only the missed words', async () => {
+    const user = userEvent.setup();
+    const setView = vi.fn();
+    renderResults(makeSession(), 'results', setView);
+
+    await user.click(screen.getByRole('button', { name: /practise 1 mistake/i }));
+
+    expect(setView).toHaveBeenCalledWith('active', { replace: true });
+  });
+
+  it('offers no mistake practice after a perfect score', () => {
+    const session = makeSession();
+    session.answers = session.answers.filter((a) => a.status === 'correct');
+    renderResults(session);
+
+    expect(screen.queryByTestId('practice-mistakes')).not.toBeInTheDocument();
+    expect(screen.getByText(/no mistakes/i)).toBeInTheDocument();
   });
 
   it('copies correct words to clipboard', async () => {

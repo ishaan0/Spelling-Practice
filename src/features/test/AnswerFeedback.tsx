@@ -1,66 +1,98 @@
 import { Check, X } from 'lucide-react';
-import type { TestAnswer } from './testTypes';
+import { diffChars, type DiffPart } from '../../utils/diffChars';
+import type { QuestionStatus, TestAnswer } from './testTypes';
 
 interface AnswerFeedbackProps {
   answer: TestAnswer | null;
-  questionStatus: 'idle' | 'speaking' | 'answering' | 'grading' | 'feedback';
+  questionStatus: QuestionStatus;
 }
+
+const HEADINGS = {
+  submitted: 'Not quite',
+  timeout: "Time's up",
+  skipped: 'Skipped',
+} as const;
 
 export function AnswerFeedback({ answer, questionStatus }: AnswerFeedbackProps) {
   if (questionStatus !== 'feedback' || !answer) return null;
 
   const isCorrect = answer.status === 'correct';
-  const wasTimeout = answer.reason === 'timeout';
+
+  if (isCorrect) {
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        className="flex w-full items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-emerald-800 animate-slide-up"
+        data-testid="feedback"
+      >
+        <Check size={18} aria-hidden="true" />
+        <span className="font-semibold">Correct</span>
+        <span className="text-emerald-700">— {answer.word}</span>
+      </div>
+    );
+  }
+
+  const typed = answer.userAnswer;
+  const diff = diffChars(typed, answer.word);
 
   return (
     <div
       role="status"
       aria-live="polite"
-      className={`mt-4 rounded-lg border p-4 ${
-        isCorrect
-          ? 'border-green-200 bg-green-50'
-          : 'border-red-200 bg-red-50'
-      }`}
+      className="w-full rounded-xl border border-red-200 bg-red-50 px-4 py-4 animate-slide-up"
       data-testid="feedback"
     >
-      <div className="flex items-center gap-2">
-        {isCorrect ? (
-          <span className="inline-flex items-center gap-1 text-green-700 font-semibold">
-            <Check size={18} aria-hidden="true" />
-            Correct
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1 text-red-700 font-semibold">
-            <X size={18} aria-hidden="true" />
-            {wasTimeout ? "Time's up" : 'Incorrect'}
-          </span>
+      <p className="flex items-center gap-1.5 font-semibold text-red-800">
+        <X size={18} aria-hidden="true" />
+        {HEADINGS[answer.reason]}
+      </p>
+      <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-4 gap-y-1.5 text-sm">
+        <dt className="text-slate-600">Correct spelling</dt>
+        <dd className="break-words text-lg font-semibold tracking-wide text-slate-900">
+          <Highlighted
+            parts={diff.expected}
+            label={answer.word}
+            changedClass="rounded-sm bg-emerald-200 text-emerald-900"
+          />
+        </dd>
+        {typed && (
+          <>
+            <dt className="text-slate-600">You typed</dt>
+            <dd className="break-words text-lg tracking-wide text-slate-700">
+              <Highlighted
+                parts={diff.typed}
+                label={typed}
+                changedClass="rounded-sm bg-red-200 text-red-900 line-through decoration-red-500/70"
+              />
+            </dd>
+          </>
         )}
-      </div>
-      {!isCorrect && (
-        <div className="mt-2 text-sm text-slate-700">
-          {wasTimeout ? (
-            <p>
-              <span className="text-slate-600">Correct spelling: </span>
-              <span className="font-semibold text-green-700">{answer.word}</span>
-            </p>
-          ) : (
-            <p>
-              <span className="text-slate-600">You wrote: </span>
-              <span className="font-mono text-red-700">
-                {answer.userAnswer || '(empty)'}
-              </span>
-              <br />
-              <span className="text-slate-600">Correct spelling: </span>
-              <span className="font-semibold text-green-700">{answer.word}</span>
-            </p>
-          )}
-        </div>
-      )}
-      {isCorrect && (
-        <div className="mt-2 text-sm text-slate-700">
-          <span className="font-semibold text-green-700">{answer.word}</span>
-        </div>
-      )}
+      </dl>
     </div>
+  );
+}
+
+/** Screen readers get the plain word; the letter-by-letter markup is visual only. */
+function Highlighted({
+  parts,
+  label,
+  changedClass,
+}: {
+  parts: DiffPart[];
+  label: string;
+  changedClass: string;
+}) {
+  return (
+    <>
+      <span className="sr-only">{label}</span>
+      <span aria-hidden="true" className="whitespace-pre-wrap">
+        {parts.map((part, i) => (
+          <span key={i} className={part.changed ? changedClass : undefined}>
+            {part.text}
+          </span>
+        ))}
+      </span>
+    </>
   );
 }
