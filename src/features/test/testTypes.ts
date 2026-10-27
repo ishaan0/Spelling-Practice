@@ -7,7 +7,9 @@ export type QuestionStatus =
   /** The word is being read out; the timer has not started yet. */
   | 'speaking'
   | 'answering'
-  | 'feedback';
+  | 'feedback'
+  /** Between two words: the user chooses to carry on or to finish. */
+  | 'break';
 
 export type TestStatus = 'active' | 'completed' | 'ended-early';
 
@@ -29,6 +31,8 @@ export interface TestSettings {
   voiceName: string | null;
   speechRate: number;
   pitch: number;
+  /** A break is offered after every this many words; null for no breaks. */
+  breakEvery: number | null;
 }
 
 export interface TestSession {

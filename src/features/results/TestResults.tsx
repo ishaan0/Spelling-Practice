@@ -6,6 +6,7 @@ import { useApp } from '../../app/AppProvider';
 import { useSpeechSynthesis } from '../speech/useSpeechSynthesis';
 import { pickVoice } from '../speech/speechService';
 import { uniqueMistakeWords } from '../test/testUtils';
+import { ownersFor } from '../collections/collectionUtils';
 import { shuffle } from '../../utils/shuffle';
 import { countLabel } from '../../utils/pluralize';
 import { ResultsSummary } from './ResultsSummary';
@@ -18,7 +19,7 @@ interface TestResultsProps {
 }
 
 export function TestResults({ session }: TestResultsProps) {
-  const { goTo, startTest, setPracticeSource, settings } = useApp();
+  const { goTo, startTest, setPracticeSource, settings, lastRun, activeCollection } = useApp();
   const { supported, voices, speak } = useSpeechSynthesis();
 
   const mistakes = useMemo(() => uniqueMistakeWords(session), [session]);
@@ -35,6 +36,16 @@ export function TestResults({ session }: TestResultsProps) {
     [speak, voices, settings.voiceName, settings.language, settings.speechRate, settings.pitch],
   );
 
+  // A retest keeps the original test's breaks and sends mistakes to the same collections.
+  const handlePractiseMistakes = () => {
+    startTest({
+      words: shuffle(mistakes),
+      breakEvery: lastRun?.breakEvery ?? null,
+      owners: lastRun?.owners ?? ownersFor(mistakes, activeCollection.id),
+      label: lastRun?.label ?? activeCollection.name,
+    });
+  };
+
   const handleNewTest = () => {
     setPracticeSource('all');
     goTo('setup');
@@ -47,11 +58,12 @@ export function TestResults({ session }: TestResultsProps) {
           <ResultsSummary
             session={session}
             status={session.status === 'active' ? 'completed' : session.status}
+            context={lastRun?.label}
           />
         </CardBody>
         <CardFooter className="flex flex-col gap-2 sm:flex-row sm:items-center">
           {mistakes.length > 0 && (
-            <Button onClick={() => startTest(shuffle(mistakes))} data-testid="practice-mistakes">
+            <Button onClick={handlePractiseMistakes} data-testid="practice-mistakes">
               <RotateCcw size={16} aria-hidden="true" />
               Practise {countLabel(mistakes.length, 'mistake')}
             </Button>

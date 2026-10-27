@@ -5,7 +5,8 @@ import {
   formatDuration,
   gradeAnswer,
   uniqueMistakeWords,
-  updateMissedWords,
+  isBreakAfter,
+  countBreaks,
 } from './testUtils';
 
 describe('gradeAnswer', () => {
@@ -142,37 +143,25 @@ describe('gradeAnswer when skipping', () => {
   });
 });
 
-describe('updateMissedWords', () => {
-  function sessionWith(results: Array<[string, string]>) {
-    const s = createSession({
-      words: results.map(([word]) => word),
-      questionCount: 'all',
-      timerEnabled: false,
-      secondsPerWord: 0,
-      language: 'en-US',
-      voiceName: null,
-      speechRate: 1,
-      pitch: 1,
-    });
-    s.answers = results.map(([word, typed], i) => gradeAnswer(word, typed, i, 'submitted'));
-    return s;
-  }
-
-  const library = ['apple', 'banana', 'cherry', 'grape'];
-
-  it('adds new mistakes and keeps earlier ones that were not tested', () => {
-    const next = updateMissedWords(['grape'], sessionWith([['apple', 'aple']]), library);
-    expect(next).toEqual(['grape', 'apple']);
+describe('breaks', () => {
+  it('is due after every n-th word, but never after the last one', () => {
+    const due = Array.from({ length: 10 }, (_, i) => isBreakAfter(i, 3, 10));
+    // Answered 3, 6 and 9 words; the 10th is the end of the test.
+    expect(due.map((d, i) => (d ? i + 1 : null)).filter(Boolean)).toEqual([3, 6, 9]);
+    expect(isBreakAfter(8, 3, 9)).toBe(false);
   });
 
-  it('clears words that are now spelled correctly', () => {
-    const next = updateMissedWords(['apple', 'grape'], sessionWith([['apple', 'apple']]), library);
-    expect(next).toEqual(['grape']);
+  it('never happens without a break setting', () => {
+    expect(isBreakAfter(29, null, 100)).toBe(false);
+    expect(isBreakAfter(0, 0, 100)).toBe(false);
   });
 
-  it('drops words that are no longer in the library', () => {
-    const next = updateMissedWords(['mango'], sessionWith([['apple', 'aple']]), library);
-    expect(next).toEqual(['apple']);
+  it('counts the breaks in a test', () => {
+    expect(countBreaks(100, 30)).toBe(3);
+    expect(countBreaks(90, 30)).toBe(2);
+    expect(countBreaks(30, 30)).toBe(0);
+    expect(countBreaks(20, 30)).toBe(0);
+    expect(countBreaks(100, null)).toBe(0);
   });
 });
 

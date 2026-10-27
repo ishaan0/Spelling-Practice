@@ -5,11 +5,16 @@ export const STORAGE_KEYS = {
   settings: 'spelling-practice:settings',
   missedWords: 'spelling-practice:missed-words',
   testHistory: 'spelling-practice:recent-tests',
+  collections: 'spelling-practice:collections',
+  activeCollection: 'spelling-practice:active-collection',
 } as const;
 
 export const MAX_IMPORT_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
 export const MAX_WORDS = 10_000;
 export const MAX_WORD_LENGTH = 60;
+
+export const MAX_COLLECTIONS = 100;
+export const MAX_COLLECTION_NAME_LENGTH = 40;
 
 export const MIN_CUSTOM_TIMER_SECONDS = 3;
 export const MAX_CUSTOM_TIMER_SECONDS = 300;
@@ -40,6 +45,8 @@ export const SUPPORTED_LANGUAGES = [
 export const TEST_LENGTH_PRESETS = [5, 10, 20, 30] as const;
 
 export const TIMER_PRESETS_SECONDS = [5, 10, 15, 20, 30] as const;
+
+export const BREAK_PRESETS = [10, 20, 30, 50] as const;
 
 export const SAMPLE_WORDS = [
   'accommodate',

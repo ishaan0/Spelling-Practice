@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { ArrowRight, CornerDownLeft, Volume2, X } from 'lucide-react';
+import { ArrowRight, Coffee, CornerDownLeft, Flag, Play, Volume2, X } from 'lucide-react';
 import { Button } from '../../components/Button';
 import { Dialog } from '../../components/Dialog';
 import { useApp } from '../../app/AppProvider';
@@ -9,7 +9,7 @@ import { TestProgress } from './TestProgress';
 import { TestTimer } from './TestTimer';
 import { AnswerInput } from './AnswerInput';
 import { AnswerFeedback } from './AnswerFeedback';
-import { createSession, gradeAnswer } from './testUtils';
+import { createSession, gradeAnswer, isBreakAfter } from './testUtils';
 import { initialState, testReducer } from './testReducer';
 import type { AnswerReason, TestSession } from './testTypes';
 import { FEEDBACK_DELAY_CORRECT_MS, SPEECH_START_FALLBACK_MS } from '../../utils/constants';
@@ -17,6 +17,10 @@ import { countLabel } from '../../utils/pluralize';
 
 interface ActiveTestProps {
   initialWords: string[];
+  /** Offer a break after every this many words; null or omitted for no breaks. */
+  breakEvery?: number | null;
+  /** What is being practised, shown under the heading. */
+  label?: string;
   /** Called once with the finished (or ended-early) session. */
   onComplete: (session: TestSession) => void;
   /** Called when the test is abandoned before anything was answered. */
@@ -25,7 +29,13 @@ interface ActiveTestProps {
 
 type AudioIssue = 'not-started' | 'failed';
 
-export function ActiveTest({ initialWords, onComplete, onExit }: ActiveTestProps) {
+export function ActiveTest({
+  initialWords,
+  breakEvery = null,
+  label,
+  onComplete,
+  onExit,
+}: ActiveTestProps) {
   const { settings } = useApp();
   // The settings a test starts with apply until it ends.
   const [testSettings] = useState(settings);
@@ -41,6 +51,7 @@ export function ActiveTest({ initialWords, onComplete, onExit }: ActiveTestProps
         voiceName: testSettings.voiceName,
         speechRate: testSettings.speechRate,
         pitch: testSettings.pitch,
+        breakEvery,
       }),
     }),
   );
@@ -184,6 +195,12 @@ export function ActiveTest({ initialWords, onComplete, onExit }: ActiveTestProps
     dispatch({ type: 'RESUME', nowMs: performance.now() });
   };
 
+  // Finishing at a break keeps the answers so far — no need to confirm.
+  const finishAtBreak = () => {
+    cancel();
+    dispatch({ type: 'END_EARLY' });
+  };
+
   const confirmEnd = () => {
     cancel();
     setShowEndConfirm(false);
@@ -200,12 +217,21 @@ export function ActiveTest({ initialWords, onComplete, onExit }: ActiveTestProps
   const answered = state.session.answers.length;
   const correctCount = state.session.answers.filter((a) => a.status === 'correct').length;
   const isLastQuestion = state.session.currentIndex >= totalQuestions - 1;
+  const breakIsNext = isBreakAfter(
+    state.session.currentIndex,
+    state.session.settings.breakEvery,
+    totalQuestions,
+  );
   const hasInput = state.input.trim().length > 0;
+  const onBreak = state.questionStatus === 'break';
 
   return (
     <div className="mx-auto w-full max-w-2xl space-y-5">
       <div className="flex items-center justify-between gap-4">
-        <h1 className="text-xl font-semibold tracking-tight text-slate-900">Spelling test</h1>
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold tracking-tight text-slate-900">Spelling test</h1>
+          {label && <p className="truncate text-sm text-slate-500">{label}</p>}
+        </div>
         <Button variant="secondary" size="sm" onClick={openEndConfirm}>
           <X size={15} aria-hidden="true" />
           End test
@@ -220,125 +246,134 @@ export function ActiveTest({ initialWords, onComplete, onExit }: ActiveTestProps
         incorrect={answered - correctCount}
       />
 
-      <section
-        aria-label="Current word"
-        className="rounded-2xl border border-slate-200 bg-white p-5 shadow-card sm:p-8"
-      >
-        {durationMs > 0 && (
-          <div className={`mb-6 ${isFeedback ? 'invisible' : ''}`}>
-            <TestTimer
-              deadlineMs={state.deadlineMs}
-              durationMs={durationMs}
-              frozenRemainingMs={state.pausedRemainingMs}
-              onExpire={handleTimeout}
-            />
-          </div>
-        )}
-
-        <div className="flex flex-col items-center gap-6">
-          <div className="flex flex-col items-center gap-2">
-            <button
-              type="button"
-              onClick={handleReplay}
-              // Keep the caret in the answer field when the speaker is clicked.
-              onMouseDown={(e) => e.preventDefault()}
-              disabled={!supported}
-              aria-label="Listen to the word again"
-              className="group relative flex h-20 w-20 items-center justify-center rounded-full bg-accent-600 text-white shadow-md transition hover:bg-accent-700 active:scale-95 focus-ring disabled:bg-slate-300"
-              data-testid="replay-btn"
-            >
-              {speaking && (
-                <span
-                  className="absolute inset-0 rounded-full bg-accent-400 animate-sound-ring"
-                  aria-hidden="true"
-                />
-              )}
-              <Volume2 size={34} className="relative" aria-hidden="true" />
-            </button>
-            <span className="text-sm font-medium text-slate-600">
-              {speaking ? 'Listen…' : 'Listen again'}
-            </span>
-          </div>
-
-          {/* The answer box and its buttons stay put; anything that comes and
-              goes (feedback, audio notices) is shown underneath them. */}
-          <div className="flex w-full flex-col gap-3">
-            <AnswerInput
-              value={state.input}
-              onChange={(value) => dispatch({ type: 'UPDATE_INPUT', value })}
-              onEnter={handleEnter}
-              locked={isFeedback}
-              result={isFeedback ? (state.lastResult?.status ?? null) : null}
-              inputRef={inputRef}
-            />
-
-            <div className="flex w-full items-center justify-between gap-2">
-              {isFeedback ? (
-                <>
-                  <span className="hidden text-xs text-slate-500 sm:block">
-                    Press <Kbd>Enter</Kbd> to continue
-                  </span>
-                  <Button
-                    size="lg"
-                    onClick={() => dispatch({ type: 'NEXT' })}
-                    className="flex-1 sm:min-w-[10rem] sm:flex-none"
-                    data-testid="next-btn"
-                  >
-                    {isLastQuestion ? 'See results' : 'Next word'}
-                    <ArrowRight size={18} aria-hidden="true" />
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <Button
-                    variant="ghost"
-                    size="lg"
-                    onClick={() => grade('skipped')}
-                    className="px-4"
-                    data-testid="skip-btn"
-                  >
-                    I don't know
-                  </Button>
-                  <Button
-                    size="lg"
-                    onClick={() => grade('submitted')}
-                    disabled={!hasInput}
-                    className="flex-1 sm:min-w-[10rem] sm:flex-none"
-                    data-testid="submit-btn"
-                  >
-                    Check
-                    <CornerDownLeft size={18} aria-hidden="true" />
-                  </Button>
-                </>
-              )}
-            </div>
-          </div>
-
-          <AnswerFeedback answer={state.lastResult} questionStatus={state.questionStatus} />
-
-          {(!supported || audioIssue) && (
-            <div
-              role="alert"
-              className="flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
-            >
-              <span>
-                {!supported
-                  ? "This browser can't read words aloud. Try Chrome, Edge or Safari."
-                  : audioIssue === 'failed'
-                    ? "The word couldn't be played."
-                    : "The audio didn't start. Check that your sound is on."}
-              </span>
-              {supported && (
-                <Button variant="secondary" size="sm" onClick={handleReplay}>
-                  Play again
-                </Button>
-              )}
+      {onBreak ? (
+        <TestBreak
+          answered={answered}
+          total={totalQuestions}
+          onContinue={() => dispatch({ type: 'CONTINUE' })}
+          onFinish={finishAtBreak}
+        />
+      ) : (
+        <section
+          aria-label="Current word"
+          className="rounded-2xl border border-slate-200 bg-white p-5 shadow-card sm:p-8"
+        >
+          {durationMs > 0 && (
+            <div className={`mb-6 ${isFeedback ? 'invisible' : ''}`}>
+              <TestTimer
+                deadlineMs={state.deadlineMs}
+                durationMs={durationMs}
+                frozenRemainingMs={state.pausedRemainingMs}
+                onExpire={handleTimeout}
+              />
             </div>
           )}
-        </div>
-      </section>
 
-      {!isFeedback && (
+          <div className="flex flex-col items-center gap-6">
+            <div className="flex flex-col items-center gap-2">
+              <button
+                type="button"
+                onClick={handleReplay}
+                // Keep the caret in the answer field when the speaker is clicked.
+                onMouseDown={(e) => e.preventDefault()}
+                disabled={!supported}
+                aria-label="Listen to the word again"
+                className="group relative flex h-20 w-20 items-center justify-center rounded-full bg-accent-600 text-white shadow-md transition hover:bg-accent-700 active:scale-95 focus-ring disabled:bg-slate-300"
+                data-testid="replay-btn"
+              >
+                {speaking && (
+                  <span
+                    className="absolute inset-0 rounded-full bg-accent-400 animate-sound-ring"
+                    aria-hidden="true"
+                  />
+                )}
+                <Volume2 size={34} className="relative" aria-hidden="true" />
+              </button>
+              <span className="text-sm font-medium text-slate-600">
+                {speaking ? 'Listen…' : 'Listen again'}
+              </span>
+            </div>
+
+            {/* The answer box and its buttons stay put; anything that comes and
+                goes (feedback, audio notices) is shown underneath them. */}
+            <div className="flex w-full flex-col gap-3">
+              <AnswerInput
+                value={state.input}
+                onChange={(value) => dispatch({ type: 'UPDATE_INPUT', value })}
+                onEnter={handleEnter}
+                locked={isFeedback}
+                result={isFeedback ? (state.lastResult?.status ?? null) : null}
+                inputRef={inputRef}
+              />
+
+              <div className="flex w-full items-center justify-between gap-2">
+                {isFeedback ? (
+                  <>
+                    <span className="hidden text-xs text-slate-500 sm:block">
+                      Press <Kbd>Enter</Kbd> to continue
+                    </span>
+                    <Button
+                      size="lg"
+                      onClick={() => dispatch({ type: 'NEXT' })}
+                      className="flex-1 sm:min-w-[10rem] sm:flex-none"
+                      data-testid="next-btn"
+                    >
+                      {isLastQuestion ? 'See results' : breakIsNext ? 'Take a break' : 'Next word'}
+                      <ArrowRight size={18} aria-hidden="true" />
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="lg"
+                      onClick={() => grade('skipped')}
+                      className="px-4"
+                      data-testid="skip-btn"
+                    >
+                      I don't know
+                    </Button>
+                    <Button
+                      size="lg"
+                      onClick={() => grade('submitted')}
+                      disabled={!hasInput}
+                      className="flex-1 sm:min-w-[10rem] sm:flex-none"
+                      data-testid="submit-btn"
+                    >
+                      Check
+                      <CornerDownLeft size={18} aria-hidden="true" />
+                    </Button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <AnswerFeedback answer={state.lastResult} questionStatus={state.questionStatus} />
+
+            {(!supported || audioIssue) && (
+              <div
+                role="alert"
+                className="flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+              >
+                <span>
+                  {!supported
+                    ? "This browser can't read words aloud. Try Chrome, Edge or Safari."
+                    : audioIssue === 'failed'
+                      ? "The word couldn't be played."
+                      : "The audio didn't start. Check that your sound is on."}
+                </span>
+                {supported && (
+                  <Button variant="secondary" size="sm" onClick={handleReplay}>
+                    Play again
+                  </Button>
+                )}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {!isFeedback && !onBreak && (
         <p className="hidden text-center text-xs text-slate-500 sm:block">
           <Kbd>Enter</Kbd> checks your answer · <Kbd>Enter</Kbd> on an empty box plays the word again
         </p>
@@ -359,6 +394,54 @@ export function ActiveTest({ initialWords, onComplete, onExit }: ActiveTestProps
         onCancel={closeEndConfirm}
       />
     </div>
+  );
+}
+
+function TestBreak({
+  answered,
+  total,
+  onContinue,
+  onFinish,
+}: {
+  answered: number;
+  total: number;
+  onContinue: () => void;
+  onFinish: () => void;
+}) {
+  const remaining = total - answered;
+  return (
+    <section
+      aria-label="Break"
+      className="flex flex-col items-center gap-5 rounded-2xl border border-slate-200 bg-white p-6 text-center shadow-card sm:p-10"
+      data-testid="test-break"
+    >
+      <span
+        className="flex h-14 w-14 items-center justify-center rounded-full bg-accent-50 text-accent-700"
+        aria-hidden="true"
+      >
+        <Coffee size={26} />
+      </span>
+      <div>
+        <h2 className="text-lg font-semibold text-slate-900">Time for a break</h2>
+        <p className="mt-1 text-sm text-slate-600">
+          You've done {answered.toLocaleString()} of {countLabel(total, 'word')} —{' '}
+          {remaining.toLocaleString()} to go.
+        </p>
+      </div>
+      <div className="flex w-full flex-col-reverse gap-2 sm:w-auto sm:flex-row">
+        <Button variant="secondary" size="lg" onClick={onFinish} data-testid="finish-at-break">
+          <Flag size={18} aria-hidden="true" />
+          Finish here
+        </Button>
+        <Button size="lg" onClick={onContinue} autoFocus data-testid="continue-btn">
+          <Play size={18} aria-hidden="true" />
+          Continue test
+        </Button>
+      </div>
+      <p className="text-xs text-slate-500">
+        Finishing shows your results for the {countLabel(answered, 'word')} answered so far.
+      </p>
+    </section>
   );
 }
 

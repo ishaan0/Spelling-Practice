@@ -1,21 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  ArrowDownAZ,
-  ArrowRight,
-  BookOpen,
-  Download,
-  Play,
-  RotateCcw,
-  Search,
-  Sparkles,
-  Trash2,
-  X,
-} from 'lucide-react';
+import { ArrowDownAZ, BookOpen, Download, Play, Search, Sparkles, Trash2, X } from 'lucide-react';
 import { Card, CardBody, CardHeader } from '../../components/Card';
 import { Button } from '../../components/Button';
 import { Dialog } from '../../components/Dialog';
 import { EmptyState } from '../../components/EmptyState';
-import { useApp } from '../../app/AppProvider';
+import { useApp, type PracticeSource } from '../../app/AppProvider';
 import { useToast } from '../../components/Toast';
 import { MAX_WORDS, SAMPLE_WORDS } from '../../utils/constants';
 import { countLabel } from '../../utils/pluralize';
@@ -24,21 +13,46 @@ import { dedupeWords } from './parseWords';
 import { WordInput } from './WordInput';
 import { WordImporter } from './WordImporter';
 import { WordList } from './WordList';
+import { CollectionBar } from '../collections/CollectionBar';
+import { FrequentErrors } from '../collections/FrequentErrors';
+import type { Collection, FrequentError } from '../collections/collectionTypes';
+import {
+  collectGlobalErrors,
+  removeErrors,
+  restoreErrors,
+  sortErrors,
+} from '../collections/collectionUtils';
 
 const SEARCH_THRESHOLD = 12;
 
+function exportFileName(collectionName: string): string {
+  const slug = collectionName
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '-')
+    .replace(/^-+|-+$/g, '');
+  return `${slug || 'spelling-words'}.txt`;
+}
+
 export function WordLibrary() {
-  const { words, setWords, missedWords, goTo, setPracticeSource } = useApp();
+  const { collections, activeCollection, updateCollection, goTo, setPracticeSource } = useApp();
   const { show } = useToast();
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [showClearErrorsConfirm, setShowClearErrorsConfirm] = useState(false);
   const [query, setQuery] = useState('');
   const [sorted, setSorted] = useState(false);
 
-  const missedSet = useMemo(() => new Set(missedWords.map((w) => w.toLowerCase())), [missedWords]);
-  const reviewCount = useMemo(
-    () => words.filter((w) => missedSet.has(w.toLowerCase())).length,
-    [words, missedSet],
-  );
+  const collectionId = activeCollection.id;
+  const { words } = activeCollection;
+  const errors = useMemo(() => sortErrors(activeCollection.errors), [activeCollection.errors]);
+  const errorSet = useMemo(() => new Set(errors.map((e) => e.word.toLowerCase())), [errors]);
+  const globalErrorCount = useMemo(() => collectGlobalErrors(collections).length, [collections]);
+
+  // Searching in one collection shouldn't carry over to the next.
+  const [shownCollectionId, setShownCollectionId] = useState(collectionId);
+  if (shownCollectionId !== collectionId) {
+    setShownCollectionId(collectionId);
+    setQuery('');
+  }
 
   const visibleWords = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -49,20 +63,25 @@ export function WordLibrary() {
   }, [words, query, sorted]);
 
   // Several files can be imported in one go; each must build on the previous
-  // one's result rather than on the list from the last render.
-  const wordsRef = useRef(words);
+  // one's result rather than on the list from the last render. Every change
+  // names its collection, so an Undo still applies there after switching.
+  const collectionsRef = useRef<Collection[]>(collections);
   useEffect(() => {
-    wordsRef.current = words;
-  }, [words]);
-  const commit = (next: string[]) => {
-    wordsRef.current = next;
-    setWords(next);
+    collectionsRef.current = collections;
+  }, [collections]);
+  const wordsOf = (id: string) => collectionsRef.current.find((c) => c.id === id)?.words ?? [];
+  const commit = (id: string, next: string[]) => {
+    collectionsRef.current = collectionsRef.current.map((c) =>
+      c.id === id ? { ...c, words: next } : c,
+    );
+    updateCollection(id, (c) => ({ ...c, words: next }));
   };
 
-  const restore = (snapshot: string[]) => () => commit(snapshot);
+  const restore = (id: string, snapshot: string[]) => () => commit(id, snapshot);
 
   const addWords = (incoming: string[], source: WordSource, fileName?: string) => {
-    const words = wordsRef.current;
+    const id = collectionId;
+    const words = wordsOf(id);
     const existing = new Set(words.map((w) => w.toLowerCase()));
     const fresh = dedupeWords(incoming).filter((w) => !existing.has(w.toLowerCase()));
     const from = fileName ? ` from “${fileName}”` : '';
@@ -80,7 +99,7 @@ export function WordLibrary() {
 
     const additions = fresh.slice(0, room);
     const snapshot = words;
-    commit([...words, ...additions]);
+    commit(id, [...words, ...additions]);
 
     const skipped = incoming.length - fresh.length;
     const details: string[] = [];
@@ -92,40 +111,64 @@ export function WordLibrary() {
     show(
       `Added ${countLabel(additions.length, label)}${from}${details.length ? ` (${details.join(', ')})` : ''}`,
       'success',
-      { action: { label: 'Undo', onClick: restore(snapshot) } },
+      { action: { label: 'Undo', onClick: restore(id, snapshot) } },
     );
   };
 
   const handleRemove = (word: string) => {
-    const snapshot = wordsRef.current;
-    commit(snapshot.filter((w) => w !== word));
-    show(`Removed “${word}”`, 'info', { action: { label: 'Undo', onClick: restore(snapshot) } });
+    const id = collectionId;
+    const snapshot = wordsOf(id);
+    commit(id, snapshot.filter((w) => w !== word));
+    show(`Removed “${word}”`, 'info', { action: { label: 'Undo', onClick: restore(id, snapshot) } });
   };
 
   const handleClear = () => {
-    const snapshot = wordsRef.current;
-    commit([]);
+    const id = collectionId;
+    const snapshot = wordsOf(id);
+    commit(id, []);
     setQuery('');
     setShowClearConfirm(false);
     show(`Removed ${countLabel(snapshot.length, 'word')}`, 'info', {
-      action: { label: 'Undo', onClick: restore(snapshot) },
+      action: { label: 'Undo', onClick: restore(id, snapshot) },
     });
   };
 
+  // Frequent errors are only ever removed here, by hand.
+  const removeFrequentErrors = (entries: FrequentError[], message: string) => {
+    const id = collectionId;
+    const removed = entries.map((e) => e.word);
+    updateCollection(id, (c) => ({ ...c, errors: removeErrors(c.errors, removed) }));
+    show(message, 'info', {
+      action: {
+        label: 'Undo',
+        onClick: () => updateCollection(id, (c) => ({ ...c, errors: restoreErrors(c.errors, entries) })),
+      },
+    });
+  };
+
+  const handleClearErrors = () => {
+    setShowClearErrorsConfirm(false);
+    removeFrequentErrors(
+      errors,
+      `Removed ${countLabel(errors.length, 'word')} from frequent errors`,
+    );
+  };
+
   const handleExport = () => {
+    const fileName = exportFileName(activeCollection.name);
     const blob = new Blob([`${words.join('\n')}\n`], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'spelling-words.txt';
+    link.download = fileName;
     document.body.appendChild(link);
     link.click();
     link.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    show(`Downloaded ${countLabel(words.length, 'word')} as spelling-words.txt`, 'success');
+    show(`Downloaded ${countLabel(words.length, 'word')} as ${fileName}`, 'success');
   };
 
-  const startPractice = (source: 'all' | 'missed') => {
+  const startPractice = (source: PracticeSource) => {
     setPracticeSource(source);
     goTo('setup');
   };
@@ -138,7 +181,8 @@ export function WordLibrary() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Your words</h1>
           <p className="mt-1 text-sm text-slate-600">
-            Add the words you want to learn, then listen and type them in a test.
+            Add the words you want to learn, then listen and type them in a test. Keep separate
+            sets of words in their own collections.
           </p>
         </div>
         <Button size="lg" onClick={() => startPractice('all')} disabled={!hasWords}>
@@ -146,6 +190,8 @@ export function WordLibrary() {
           Start practice
         </Button>
       </header>
+
+      <CollectionBar />
 
       <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
         <Card>
@@ -215,26 +261,6 @@ export function WordLibrary() {
             </CardBody>
           ) : (
             <>
-              {reviewCount > 0 && (
-                <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-amber-100 bg-amber-50/70 px-5 py-3 sm:px-6">
-                  <p className="flex items-center gap-2 text-sm text-amber-900">
-                    <RotateCcw size={15} className="shrink-0" aria-hidden="true" />
-                    <span>
-                      <span className="font-semibold">{countLabel(reviewCount, 'word')}</span> to
-                      review from earlier tests
-                    </span>
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => startPractice('missed')}
-                    className="inline-flex items-center gap-1 rounded-md text-sm font-semibold text-amber-900 underline-offset-2 hover:underline focus-ring"
-                  >
-                    Practise them
-                    <ArrowRight size={14} aria-hidden="true" />
-                  </button>
-                </div>
-              )}
-
               {words.length >= SEARCH_THRESHOLD && (
                 <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-3 sm:px-6">
                   <div className="relative min-w-0 flex-1">
@@ -283,9 +309,9 @@ export function WordLibrary() {
                   </p>
                 ) : (
                   <WordList
-                    key={`${query}|${sorted}`}
+                    key={`${collectionId}|${query}|${sorted}`}
                     words={visibleWords}
-                    missed={missedSet}
+                    missed={errorSet}
                     onRemove={handleRemove}
                   />
                 )}
@@ -295,15 +321,35 @@ export function WordLibrary() {
         </Card>
       </div>
 
+      <FrequentErrors
+        errors={errors}
+        globalCount={globalErrorCount}
+        showGlobal={collections.length > 1}
+        onRemove={(entry) => removeFrequentErrors([entry], `Removed “${entry.word}” from frequent errors`)}
+        onClear={() => setShowClearErrorsConfirm(true)}
+        onPractise={() => startPractice('errors')}
+        onPractiseGlobal={() => startPractice('global-errors')}
+      />
+
       <Dialog
         open={showClearConfirm}
-        title="Clear your word list?"
-        description={`This removes all ${countLabel(words.length, 'word')} from this browser.`}
+        title="Clear this word list?"
+        description={`This removes all ${countLabel(words.length, 'word')} from “${activeCollection.name}”. Its frequent errors are kept.`}
         confirmLabel="Clear all"
         confirmVariant="danger"
         cancelLabel="Keep words"
         onConfirm={handleClear}
         onCancel={() => setShowClearConfirm(false)}
+      />
+      <Dialog
+        open={showClearErrorsConfirm}
+        title="Clear frequent errors?"
+        description={`This removes all ${countLabel(errors.length, 'word')} from the frequent errors of “${activeCollection.name}”. The words stay in the word list.`}
+        confirmLabel="Clear errors"
+        confirmVariant="danger"
+        cancelLabel="Keep them"
+        onConfirm={handleClearErrors}
+        onCancel={() => setShowClearErrorsConfirm(false)}
       />
     </div>
   );

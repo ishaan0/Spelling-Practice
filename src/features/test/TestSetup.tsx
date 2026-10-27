@@ -6,15 +6,17 @@ import { Button } from '../../components/Button';
 import { Choice, ChoiceGroup } from '../../components/ChoiceGroup';
 import { EmptyState } from '../../components/EmptyState';
 import { Switch } from '../../components/Switch';
-import { useApp } from '../../app/AppProvider';
+import { useApp, type PracticeSource, type TestRunRequest } from '../../app/AppProvider';
 import { useSpeechSynthesis } from '../speech/useSpeechSynthesis';
 import { pickVoice, voiceMatchesLanguage } from '../speech/speechService';
 import {
+  BREAK_PRESETS,
   DEFAULT_SPEECH_PITCH,
   DEFAULT_SPEECH_RATE,
   MAX_CUSTOM_TIMER_SECONDS,
   MAX_SPEECH_PITCH,
   MAX_SPEECH_RATE,
+  MAX_WORDS,
   MIN_CUSTOM_TIMER_SECONDS,
   MIN_SPEECH_PITCH,
   MIN_SPEECH_RATE,
@@ -24,11 +26,19 @@ import {
 } from '../../utils/constants';
 import { countLabel } from '../../utils/pluralize';
 import { shuffle } from '../../utils/shuffle';
-import { formatDuration } from './testUtils';
+import { countBreaks, formatDuration } from './testUtils';
+import {
+  collectGlobalErrors,
+  ownersFor,
+  ownersForGlobalErrors,
+  sortErrors,
+} from '../collections/collectionUtils';
 
 interface TestSetupProps {
-  onStart: (selectedWords: string[]) => void;
+  onStart: (run: TestRunRequest) => void;
 }
+
+const SOURCES: readonly PracticeSource[] = ['all', 'errors', 'global-errors'];
 
 // Rough time to hear, type and review one word when there is no time limit.
 const UNTIMED_SECONDS_PER_WORD = 12;
@@ -43,19 +53,57 @@ function isTimerPreset(seconds: number): boolean {
   return (TIMER_PRESETS_SECONDS as readonly number[]).includes(seconds);
 }
 
+function isBreakPreset(words: number): boolean {
+  return (BREAK_PRESETS as readonly number[]).includes(words);
+}
+
+/** `30, 3` → `after words 30, 60 and 90`; long lists are shortened. */
+function describeBreaks(breakEvery: number, count: number): string {
+  const at = (n: number) => (n * breakEvery).toLocaleString();
+  if (count === 1) return `after word ${at(1)}`;
+  if (count <= 4) {
+    const all = Array.from({ length: count }, (_, i) => at(i + 1));
+    return `after words ${all.slice(0, -1).join(', ')} and ${all[all.length - 1]}`;
+  }
+  return `after words ${at(1)}, ${at(2)}, ${at(3)} … ${at(count)}`;
+}
+
 export function TestSetup({ onStart }: TestSetupProps) {
-  const { words, missedWords, settings, setSettings, goTo, practiceSource, setPracticeSource } =
-    useApp();
+  const {
+    collections,
+    activeCollection,
+    settings,
+    setSettings,
+    goTo,
+    practiceSource,
+    setPracticeSource,
+  } = useApp();
   const speech = useSpeechSynthesis();
   const { voices } = speech;
 
   // ----- Which words -----
-  const reviewWords = useMemo(() => {
-    const missed = new Set(missedWords.map((w) => w.toLowerCase()));
-    return words.filter((w) => missed.has(w.toLowerCase()));
-  }, [words, missedWords]);
-  const source = practiceSource === 'missed' && reviewWords.length > 0 ? 'missed' : 'all';
-  const pool = source === 'missed' ? reviewWords : words;
+  const errorWords = useMemo(
+    () => sortErrors(activeCollection.errors).map((e) => e.word),
+    [activeCollection.errors],
+  );
+  const globalErrors = useMemo(() => collectGlobalErrors(collections), [collections]);
+  const pools = useMemo<Record<PracticeSource, string[]>>(
+    () => ({
+      all: activeCollection.words,
+      // Most-missed first, so an unshuffled shorter test takes the worst ones.
+      errors: errorWords,
+      'global-errors': globalErrors.map((e) => e.word),
+    }),
+    [activeCollection.words, errorWords, globalErrors],
+  );
+  // With one collection, "all collections" would be the same list twice.
+  const sources = SOURCES.filter(
+    (s) => pools[s].length > 0 && (s !== 'global-errors' || collections.length > 1),
+  );
+  const source: PracticeSource = sources.includes(practiceSource)
+    ? practiceSource
+    : (sources[0] ?? 'all');
+  const pool = pools[source];
   const available = pool.length;
 
   // ----- How many -----
@@ -92,6 +140,16 @@ export function TestSetup({ onStart }: TestSetupProps) {
     customTimerValue <= MAX_CUSTOM_TIMER_SECONDS;
   const timerInvalid = settings.timerEnabled && customTimer && !customTimerValid;
 
+  // ----- Breaks -----
+  const [customBreak, setCustomBreak] = useState(() => !isBreakPreset(settings.wordsPerBreak));
+  const [customBreakText, setCustomBreakText] = useState(() => String(settings.wordsPerBreak));
+  const customBreakValue = parseWholeNumber(customBreakText);
+  const customBreakValid =
+    customBreakValue !== null && customBreakValue >= 1 && customBreakValue <= MAX_WORDS;
+  const breakInvalid = settings.breaksEnabled && customBreak && !customBreakValid;
+  const breakEvery = settings.breaksEnabled ? settings.wordsPerBreak : null;
+  const breakCount = countBreaks(selectedCount, breakEvery);
+
   // ----- Voice -----
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [voicesSettled, setVoicesSettled] = useState(false);
@@ -123,21 +181,38 @@ export function TestSetup({ onStart }: TestSetupProps) {
     });
   };
 
-  const canStart = speech.supported && selectedCount > 0 && !timerInvalid;
+  const canStart = speech.supported && selectedCount > 0 && !timerInvalid && !breakInvalid;
+
+  const sourceLabel =
+    source === 'global-errors'
+      ? 'Frequent errors · All collections'
+      : source === 'errors'
+        ? `${activeCollection.name} · Frequent errors`
+        : activeCollection.name;
 
   const handleStart = () => {
     if (!canStart) return;
     const ordered = settings.shuffle ? shuffle(pool) : pool;
     // Without shuffling, a shorter test takes the first words of the list.
-    onStart(ordered.slice(0, selectedCount));
+    const testWords = ordered.slice(0, selectedCount);
+    onStart({
+      words: testWords,
+      breakEvery: breakCount > 0 ? breakEvery : null,
+      // Mistakes go back to the collection(s) the words came from.
+      owners:
+        source === 'global-errors'
+          ? ownersForGlobalErrors(globalErrors)
+          : ownersFor(testWords, activeCollection.id),
+      label: sourceLabel,
+    });
   };
 
-  if (words.length === 0) {
+  if (sources.length === 0) {
     return (
       <Card className="mx-auto max-w-2xl">
         <EmptyState
           title="Add some words first"
-          description="You need at least one word in your list before you can start a test."
+          description={`“${activeCollection.name}” has no words yet. Add at least one before you start a test.`}
           action={<Button onClick={() => goTo('library')}>Go to your words</Button>}
         />
       </Card>
@@ -178,18 +253,35 @@ export function TestSetup({ onStart }: TestSetupProps) {
       )}
 
       <Card className="divide-y divide-slate-100">
-        {reviewWords.length > 0 && (
-          <Row title="Words" hint="Practise everything or only what you got wrong.">
-            <ChoiceGroup label="Words to practise">
+        <Row
+          title="Words"
+          hint={
+            source === 'global-errors'
+              ? 'Every collection’s frequent errors, each word once.'
+              : `From “${activeCollection.name}”.`
+          }
+        >
+          <ChoiceGroup label="Words to practise">
+            {sources.includes('all') && (
               <Choice active={source === 'all'} onSelect={() => setPracticeSource('all')}>
-                All words ({words.length.toLocaleString()})
+                All words ({pools.all.length.toLocaleString()})
               </Choice>
-              <Choice active={source === 'missed'} onSelect={() => setPracticeSource('missed')}>
-                To review ({reviewWords.length.toLocaleString()})
+            )}
+            {sources.includes('errors') && (
+              <Choice active={source === 'errors'} onSelect={() => setPracticeSource('errors')}>
+                Frequent errors ({pools.errors.length.toLocaleString()})
               </Choice>
-            </ChoiceGroup>
-          </Row>
-        )}
+            )}
+            {sources.includes('global-errors') && (
+              <Choice
+                active={source === 'global-errors'}
+                onSelect={() => setPracticeSource('global-errors')}
+              >
+                Errors from all collections ({pools['global-errors'].length.toLocaleString()})
+              </Choice>
+            )}
+          </ChoiceGroup>
+        </Row>
 
         <Row title="Number of words" hint={`${countLabel(available, 'word')} available.`}>
           <ChoiceGroup label="Number of words">
@@ -333,6 +425,80 @@ export function TestSetup({ onStart }: TestSetupProps) {
           )}
         </Row>
 
+        <Row title="Breaks" hint="Stop after a set number of words, then carry on or finish.">
+          <label className="flex w-fit cursor-pointer items-center gap-3">
+            <Switch
+              checked={settings.breaksEnabled}
+              onChange={(breaksEnabled) => setSettings((s) => ({ ...s, breaksEnabled }))}
+              label="Take breaks during the test"
+            />
+            <span className="text-sm text-slate-700">
+              {settings.breaksEnabled ? 'Take a break every' : 'No breaks'}
+            </span>
+          </label>
+          {settings.breaksEnabled && (
+            <div className="mt-4">
+              <ChoiceGroup label="Words between breaks">
+                {BREAK_PRESETS.map((n) => (
+                  <Choice
+                    key={n}
+                    active={!customBreak && settings.wordsPerBreak === n}
+                    onSelect={() => {
+                      setCustomBreak(false);
+                      setSettings((p) => ({ ...p, wordsPerBreak: n }));
+                    }}
+                  >
+                    {n} words
+                  </Choice>
+                ))}
+                <Choice
+                  active={customBreak}
+                  onSelect={() => {
+                    setCustomBreak(true);
+                    setCustomBreakText(String(settings.wordsPerBreak));
+                  }}
+                >
+                  Custom
+                </Choice>
+                {customBreak && (
+                  <span className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      max={MAX_WORDS}
+                      value={customBreakText}
+                      autoFocus
+                      onChange={(e) => {
+                        setCustomBreakText(e.target.value);
+                        const n = parseWholeNumber(e.target.value);
+                        if (n !== null && n >= 1 && n <= MAX_WORDS) {
+                          setSettings((p) => ({ ...p, wordsPerBreak: n }));
+                        }
+                      }}
+                      aria-label="Custom number of words between breaks"
+                      aria-invalid={!customBreakValid}
+                      className={`field h-9 w-20 text-center tabular-nums ${customBreakValid ? '' : 'field-invalid'}`}
+                    />
+                    <span className="text-sm text-slate-500">words</span>
+                  </span>
+                )}
+              </ChoiceGroup>
+              {customBreak && !customBreakValid ? (
+                <FieldError>Enter a number from 1 to {MAX_WORDS.toLocaleString()}.</FieldError>
+              ) : (
+                selectedCount > 0 && (
+                  <p className="mt-2 text-xs text-slate-500" data-testid="break-summary">
+                    {breakCount === 0
+                      ? `A test of ${countLabel(selectedCount, 'word')} ends before the first break.`
+                      : `${countLabel(breakCount, 'break')}, ${describeBreaks(settings.wordsPerBreak, breakCount)}.`}
+                  </p>
+                )
+              )}
+            </div>
+          )}
+        </Row>
+
         <Row title="Voice" hint="How the words are read to you.">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="min-w-0 text-sm text-slate-700">
@@ -469,6 +635,7 @@ export function TestSetup({ onStart }: TestSetupProps) {
                 </span>
                 {' · '}
                 {settings.timerEnabled ? `${settings.secondsPerWord}s each` : 'no time limit'}
+                {breakCount > 0 && ` · break every ${settings.wordsPerBreak.toLocaleString()}`}
                 {' · '}about {estimate}
               </>
             ) : (

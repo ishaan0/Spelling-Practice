@@ -1,5 +1,6 @@
 import type { TestAnswer, QuestionStatus, TestSession } from './testTypes';
 import { generateId } from '../../utils/ids';
+import { isBreakAfter } from './testUtils';
 
 export interface TestState {
   session: TestSession | null;
@@ -33,6 +34,8 @@ export type TestAction =
   | { type: 'UPDATE_INPUT'; value: string }
   | { type: 'GRADE'; answer: TestAnswer }
   | { type: 'NEXT' }
+  /** Ends a break and reads out the next word. */
+  | { type: 'CONTINUE' }
   | { type: 'PAUSE'; nowMs: number }
   | { type: 'RESUME'; nowMs: number }
   | { type: 'END_EARLY' }
@@ -113,6 +116,23 @@ export function testReducer(state: TestState, action: TestAction): TestState {
           pausedRemainingMs: null,
         };
       }
+      const { breakEvery } = state.session.settings;
+      if (isBreakAfter(state.session.currentIndex, breakEvery, state.session.words.length)) {
+        return {
+          ...state,
+          questionStatus: 'break',
+          currentWord: null,
+          questionId: null,
+          input: '',
+          lastResult: null,
+          deadlineMs: null,
+          pausedRemainingMs: null,
+          session: {
+            ...state.session,
+            currentIndex: nextIndex,
+          },
+        };
+      }
       const nextWord = state.session.words[nextIndex] ?? null;
       return {
         ...state,
@@ -127,6 +147,17 @@ export function testReducer(state: TestState, action: TestAction): TestState {
           ...state.session,
           currentIndex: nextIndex,
         },
+      };
+    }
+    case 'CONTINUE': {
+      if (!state.session || state.questionStatus !== 'break') return state;
+      const word = state.session.words[state.session.currentIndex] ?? null;
+      if (word === null) return state;
+      return {
+        ...state,
+        questionStatus: 'speaking',
+        currentWord: word,
+        questionId: generateId(),
       };
     }
     case 'PAUSE': {

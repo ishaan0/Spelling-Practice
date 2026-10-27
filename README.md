@@ -2,20 +2,28 @@
 
 Practise spelling by ear: add your own words, hear each one read aloud, and type what you hear.
 
-Everything runs in the browser. Words, settings and the words you still need to review are
+Everything runs in the browser. Collections, their words and frequent errors, and settings are
 saved in `localStorage` — there is no server and no account.
 
 ## Features
 
+- **Collections**: keep separate sets of words (e.g. one per week or subject), each with its
+  own word list and frequent errors. Create, rename, switch and delete them (with undo) from
+  the Words page. A word list saved by an earlier version becomes the "My words" collection.
 - **Add words** by typing, pasting or uploading `.txt`, `.csv` or `.json` files
   (drag and drop works too). Duplicates, list markers (`1.`, `-`, `•`) and blank lines are
   cleaned up automatically.
 - **Word list** with search, A–Z sorting, undo for removals and export to a text file.
-- **Tests** with a configurable length, optional time limit per word, shuffle, and a choice
-  of accent, voice, speed and pitch.
+- **Tests** with a configurable length (any number of words, or all of them), optional time
+  limit per word, shuffle, and a choice of accent, voice, speed and pitch.
+- **Breaks**: optionally stop after every N words (e.g. a 100-word test with a break every
+  30), then continue or finish — finishing shows results for the words answered so far.
 - **Feedback** that highlights exactly which letters were wrong.
-- **Review**: words you miss are remembered until you spell them correctly, and can be
-  practised on their own.
+- **Frequent errors**: every word you misspell in any test is added to the frequent errors of
+  the collection it came from, with a count of how often it was missed. Words only leave the
+  list when you remove them. Practise a collection's frequent errors, or the frequent errors of
+  **all collections** together — each word appears once, and mistakes in that test are counted
+  in every collection the word came from.
 
 ## Development
 

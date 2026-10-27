@@ -3,7 +3,7 @@ import { X } from 'lucide-react';
 
 interface WordListProps {
   words: string[];
-  /** Lower-cased words that were missed in earlier tests. */
+  /** Lower-cased words that are in the collection's frequent errors. */
   missed?: ReadonlySet<string>;
   onRemove: (word: string) => void;
 }
@@ -31,10 +31,10 @@ export function WordList({ words, missed, onRemove }: WordListProps) {
                     ? 'border-amber-200 bg-amber-50 text-amber-900'
                     : 'border-slate-200 bg-slate-50 text-slate-800'
                 }`}
-                title={needsReview ? `${word} — missed in an earlier test` : word}
+                title={needsReview ? `${word} — in your frequent errors` : word}
               >
                 <span className="truncate">{word}</span>
-                {needsReview && <span className="sr-only"> (needs review)</span>}
+                {needsReview && <span className="sr-only"> (frequent error)</span>}
                 <button
                   type="button"
                   onClick={() => onRemove(word)}

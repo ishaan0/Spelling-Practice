@@ -178,3 +178,79 @@ describe('testReducer', () => {
     expect(state.session?.answers).toHaveLength(0);
   });
 });
+describe('testReducer breaks', () => {
+  function sessionWithBreaks(words: string[], breakEvery: number | null) {
+    return createSession({
+      words,
+      questionCount: 'all',
+      timerEnabled: false,
+      secondsPerWord: 10,
+      language: 'en-US',
+      voiceName: null,
+      speechRate: 1,
+      pitch: 1,
+      breakEvery,
+    });
+  }
+
+  function answerCurrent(state: ReturnType<typeof testReducer>) {
+    const index = state.session!.currentIndex;
+    const graded = testReducer(state, {
+      type: 'GRADE',
+      answer: makeAnswer({ id: `a${index}`, word: state.currentWord!, questionIndex: index }),
+    });
+    return testReducer(graded, { type: 'NEXT' });
+  }
+
+  it('stops for a break after every n words and continues with the next word', () => {
+    let state = testReducer(initialState, {
+      type: 'START',
+      session: sessionWithBreaks(['a', 'b', 'c', 'd', 'e'], 2),
+    });
+
+    state = answerCurrent(state);
+    expect(state.questionStatus).toBe('speaking');
+    state = answerCurrent(state);
+    expect(state.questionStatus).toBe('break');
+    expect(state.currentWord).toBeNull();
+    expect(state.session!.currentIndex).toBe(2);
+
+    // Answers can't be given during a break.
+    expect(testReducer(state, { type: 'UPDATE_INPUT', value: 'x' })).toBe(state);
+
+    state = testReducer(state, { type: 'CONTINUE' });
+    expect(state.questionStatus).toBe('speaking');
+    expect(state.currentWord).toBe('c');
+    expect(state.questionId).not.toBeNull();
+  });
+
+  it('never stops for a break after the last word', () => {
+    let state = testReducer(initialState, {
+      type: 'START',
+      session: sessionWithBreaks(['a', 'b'], 2),
+    });
+    state = answerCurrent(answerCurrent(state));
+    expect(state.session!.status).toBe('completed');
+  });
+
+  it('can finish the test at a break, keeping the answers so far', () => {
+    let state = testReducer(initialState, {
+      type: 'START',
+      session: sessionWithBreaks(['a', 'b', 'c'], 1),
+    });
+    state = answerCurrent(state);
+    expect(state.questionStatus).toBe('break');
+
+    state = testReducer(state, { type: 'END_EARLY' });
+    expect(state.session!.status).toBe('ended-early');
+    expect(state.session!.answers).toHaveLength(1);
+  });
+
+  it('ignores CONTINUE outside a break', () => {
+    const state = testReducer(initialState, {
+      type: 'START',
+      session: sessionWithBreaks(['a', 'b'], 1),
+    });
+    expect(testReducer(state, { type: 'CONTINUE' })).toBe(state);
+  });
+});

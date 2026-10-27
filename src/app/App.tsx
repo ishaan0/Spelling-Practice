@@ -83,6 +83,8 @@ function ViewRouter() {
       <ActiveTest
         key={testRun.id}
         initialWords={testRun.words}
+        breakEvery={testRun.breakEvery}
+        label={testRun.label}
         onComplete={completeTest}
         onExit={() => goTo('setup', { replace: true })}
       />

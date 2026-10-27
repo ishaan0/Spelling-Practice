@@ -2,17 +2,18 @@ import { createContext, useCallback, useContext, useMemo, useState } from 'react
 import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import {
-  loadMissedWords,
+  loadActiveCollectionId,
+  loadCollections,
   loadSettings,
-  loadWords,
-  saveMissedWords,
+  saveActiveCollectionId,
+  saveCollections,
   saveSettings,
-  saveWords,
   type PersistedSettings,
 } from '../services/storage/storageService';
 import { STORAGE_KEYS } from '../utils/constants';
 import type { TestSession } from '../features/test/testTypes';
-import { updateMissedWords } from '../features/test/testUtils';
+import type { Collection, WordOwners } from '../features/collections/collectionTypes';
+import { createCollection, recordMistakes } from '../features/collections/collectionUtils';
 
 export type AppView = 'library' | 'setup' | 'active' | 'results';
 
@@ -21,22 +22,41 @@ export interface GoToOptions {
   replace?: boolean;
 }
 
-export type PracticeSource = 'all' | 'missed';
+/**
+ * `all` and `errors` are the active collection's words and frequent errors;
+ * `global-errors` is the frequent errors of every collection, each word once.
+ */
+export type PracticeSource = 'all' | 'errors' | 'global-errors';
 
 export interface TestRun {
   /** Changes for every run so a repeated test starts from scratch. */
   id: number;
   words: string[];
+  /** A break is offered after every this many words; null for no breaks. */
+  breakEvery: number | null;
+  /** Where each word's mistakes are recorded. */
+  owners: WordOwners;
+  /** What is being practised, e.g. the collection's name. */
+  label: string;
 }
 
+export type TestRunRequest = Omit<TestRun, 'id'>;
+
 export interface AppContextValue {
-  words: string[];
-  setWords: Dispatch<SetStateAction<string[]>>;
+  collections: Collection[];
+  /** The collection the word list and practice screens work on. Always set. */
+  activeCollection: Collection;
+  selectCollection: (id: string) => void;
+  /** Adds a collection (the name must already be validated) and makes it active. */
+  addCollection: (name: string) => Collection;
+  /** Applies a change to one collection; does nothing if it no longer exists. */
+  updateCollection: (id: string, update: (collection: Collection) => Collection) => void;
+  /** Removes a collection, unless it is the only one. */
+  deleteCollection: (id: string) => void;
+  /** Puts a deleted collection back at its old position (for Undo). */
+  restoreCollection: (collection: Collection, index: number) => void;
   settings: PersistedSettings;
   setSettings: Dispatch<SetStateAction<PersistedSettings>>;
-  /** Words answered wrongly that have not been spelled correctly since. */
-  missedWords: string[];
-  setMissedWords: Dispatch<SetStateAction<string[]>>;
   /** True when the browser refused to save (storage full or disabled). */
   storageFailed: boolean;
   view: AppView;
@@ -44,8 +64,10 @@ export interface AppContextValue {
   practiceSource: PracticeSource;
   setPracticeSource: (source: PracticeSource) => void;
   testRun: TestRun | null;
-  startTest: (words: string[]) => void;
+  startTest: (run: TestRunRequest) => void;
   lastSession: TestSession | null;
+  /** The run that produced `lastSession`. */
+  lastRun: TestRun | null;
   completeTest: (session: TestSession) => void;
 }
 
@@ -61,10 +83,17 @@ export function AppProvider({ view, setView, children }: AppProviderProps) {
   const [storageFailed, setStorageFailed] = useState(false);
   const onWriteError = useCallback(() => setStorageFailed(true), []);
 
-  const [words, setWords] = useLocalStorage<string[]>(
-    STORAGE_KEYS.words,
-    loadWords,
-    saveWords,
+  const [collections, setCollections] = useLocalStorage<Collection[]>(
+    STORAGE_KEYS.collections,
+    loadCollections,
+    saveCollections,
+    onWriteError,
+  );
+
+  const [activeCollectionId, setActiveCollectionId] = useLocalStorage<string | null>(
+    STORAGE_KEYS.activeCollection,
+    loadActiveCollectionId,
+    saveActiveCollectionId,
     onWriteError,
   );
 
@@ -75,16 +104,54 @@ export function AppProvider({ view, setView, children }: AppProviderProps) {
     onWriteError,
   );
 
-  const [missedWords, setMissedWords] = useLocalStorage<string[]>(
-    STORAGE_KEYS.missedWords,
-    loadMissedWords,
-    saveMissedWords,
-    onWriteError,
-  );
-
   const [practiceSource, setPracticeSource] = useState<PracticeSource>('all');
   const [testRun, setTestRun] = useState<TestRun | null>(null);
   const [lastSession, setLastSession] = useState<TestSession | null>(null);
+  const [lastRun, setLastRun] = useState<TestRun | null>(null);
+
+  // A stale id (deleted here or in another tab) falls back to the first collection.
+  const activeCollection =
+    collections.find((c) => c.id === activeCollectionId) ?? (collections[0] as Collection);
+
+  const selectCollection = useCallback(
+    (id: string) => setActiveCollectionId(id),
+    [setActiveCollectionId],
+  );
+
+  const addCollection = useCallback(
+    (name: string) => {
+      const collection = createCollection(name, Date.now());
+      setCollections((prev) => [...prev, collection]);
+      setActiveCollectionId(collection.id);
+      return collection;
+    },
+    [setCollections, setActiveCollectionId],
+  );
+
+  const updateCollection = useCallback(
+    (id: string, update: (collection: Collection) => Collection) => {
+      setCollections((prev) => prev.map((c) => (c.id === id ? update(c) : c)));
+    },
+    [setCollections],
+  );
+
+  const deleteCollection = useCallback(
+    (id: string) => {
+      setCollections((prev) => (prev.length <= 1 ? prev : prev.filter((c) => c.id !== id)));
+    },
+    [setCollections],
+  );
+
+  const restoreCollection = useCallback(
+    (collection: Collection, index: number) => {
+      setCollections((prev) =>
+        prev.some((c) => c.id === collection.id)
+          ? prev
+          : [...prev.slice(0, index), collection, ...prev.slice(index)],
+      );
+    },
+    [setCollections],
+  );
 
   const goTo = useCallback(
     (next: AppView, options?: GoToOptions) => {
@@ -94,9 +161,9 @@ export function AppProvider({ view, setView, children }: AppProviderProps) {
   );
 
   const startTest = useCallback(
-    (testWords: string[]) => {
-      if (testWords.length === 0) return;
-      setTestRun((prev) => ({ id: (prev?.id ?? 0) + 1, words: testWords }));
+    (run: TestRunRequest) => {
+      if (run.words.length === 0) return;
+      setTestRun((prev) => ({ ...run, id: (prev?.id ?? 0) + 1 }));
       // Starting again from the results replaces them, so Back doesn't pile up old results.
       setView('active', { replace: view === 'results' });
     },
@@ -106,22 +173,29 @@ export function AppProvider({ view, setView, children }: AppProviderProps) {
   const completeTest = useCallback(
     (session: TestSession) => {
       setLastSession(session);
+      setLastRun(testRun);
       setTestRun(null);
-      setMissedWords((prev) => updateMissedWords(prev, session, words));
+      if (testRun) {
+        const now = session.endedAt ?? Date.now();
+        setCollections((prev) => recordMistakes(prev, session, testRun.owners, now));
+      }
       // The finished test should not be reachable with the Back button.
       setView('results', { replace: true });
     },
-    [setView, setMissedWords, words],
+    [setView, setCollections, testRun],
   );
 
   const value = useMemo<AppContextValue>(
     () => ({
-      words,
-      setWords,
+      collections,
+      activeCollection,
+      selectCollection,
+      addCollection,
+      updateCollection,
+      deleteCollection,
+      restoreCollection,
       settings,
       setSettings,
-      missedWords,
-      setMissedWords,
       storageFailed,
       view,
       goTo,
@@ -130,15 +204,19 @@ export function AppProvider({ view, setView, children }: AppProviderProps) {
       testRun,
       startTest,
       lastSession,
+      lastRun,
       completeTest,
     }),
     [
-      words,
-      setWords,
+      collections,
+      activeCollection,
+      selectCollection,
+      addCollection,
+      updateCollection,
+      deleteCollection,
+      restoreCollection,
       settings,
       setSettings,
-      missedWords,
-      setMissedWords,
       storageFailed,
       view,
       goTo,
@@ -146,6 +224,7 @@ export function AppProvider({ view, setView, children }: AppProviderProps) {
       testRun,
       startTest,
       lastSession,
+      lastRun,
       completeTest,
     ],
   );

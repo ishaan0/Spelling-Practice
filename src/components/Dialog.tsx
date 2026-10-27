@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef } from 'react';
-import type { ReactNode } from 'react';
+import type { ReactNode, RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { Button } from './Button';
 
@@ -10,6 +10,11 @@ interface DialogProps {
   confirmLabel?: string;
   cancelLabel?: string;
   confirmVariant?: 'primary' | 'danger';
+  confirmDisabled?: boolean;
+  /** Extra content, such as a form field, shown under the description. */
+  children?: ReactNode;
+  /** Receives focus when the dialog opens, instead of one of the buttons. */
+  initialFocusRef?: RefObject<HTMLElement | null>;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -23,6 +28,9 @@ export function Dialog({
   confirmLabel = 'Confirm',
   cancelLabel = 'Cancel',
   confirmVariant = 'primary',
+  confirmDisabled = false,
+  children,
+  initialFocusRef,
   onConfirm,
   onCancel,
 }: DialogProps) {
@@ -41,7 +49,7 @@ export function Dialog({
     if (!open) return;
     const previouslyFocused = document.activeElement as HTMLElement | null;
     // Destructive dialogs start on the safe choice so a stray Enter does no harm.
-    (confirmVariant === 'danger' ? cancelRef : confirmRef).current?.focus();
+    (initialFocusRef ?? (confirmVariant === 'danger' ? cancelRef : confirmRef)).current?.focus();
 
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
@@ -78,7 +86,7 @@ export function Dialog({
       document.body.style.overflow = previousOverflow;
       if (previouslyFocused?.isConnected) previouslyFocused.focus();
     };
-  }, [open, confirmVariant]);
+  }, [open, confirmVariant, initialFocusRef]);
 
   if (!open) return null;
 
@@ -107,11 +115,17 @@ export function Dialog({
             {description}
           </div>
         )}
+        {children && <div className="mt-4">{children}</div>}
         <div className="mt-6 flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
           <Button ref={cancelRef} variant="secondary" onClick={onCancel}>
             {cancelLabel}
           </Button>
-          <Button ref={confirmRef} variant={confirmVariant} onClick={onConfirm}>
+          <Button
+            ref={confirmRef}
+            variant={confirmVariant}
+            onClick={onConfirm}
+            disabled={confirmDisabled}
+          >
             {confirmLabel}
           </Button>
         </div>
