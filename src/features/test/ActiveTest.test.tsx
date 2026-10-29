@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, act, within, fireEvent } from '@testing-library/react';
+import { render, screen, act, within, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ActiveTest } from './ActiveTest';
 import { ToastProvider } from '../../components/Toast';
@@ -14,7 +14,12 @@ import {
   __getPendingUtterances,
 } from '../../test/mocks/speechSynthesis';
 
-function renderActive(words: string[], onComplete = vi.fn(), onExit = vi.fn()) {
+function renderActive(
+  words: string[],
+  onComplete = vi.fn(),
+  onExit = vi.fn(),
+  breakEvery: number | null = null,
+) {
   function Wrapper({ children }: { children: ReactNode }) {
     return (
       <ToastProvider>
@@ -26,7 +31,12 @@ function renderActive(words: string[], onComplete = vi.fn(), onExit = vi.fn()) {
   }
   return render(
     <Wrapper>
-      <ActiveTest initialWords={words} onComplete={onComplete} onExit={onExit} />
+      <ActiveTest
+        initialWords={words}
+        breakEvery={breakEvery}
+        onComplete={onComplete}
+        onExit={onExit}
+      />
     </Wrapper>,
   );
 }
@@ -194,6 +204,56 @@ describe('ActiveTest integration', () => {
     const session = onComplete.mock.calls[0]![0] as TestSession;
     expect(session.status).toBe('ended-early');
     expect(session.answers).toHaveLength(1);
+  });
+});
+
+describe('ActiveTest breaks', () => {
+  beforeEach(() => {
+    __installSpeechSynthesisMock();
+  });
+
+  async function answerWrong(user: ReturnType<typeof userEvent.setup>) {
+    await user.type(screen.getByTestId('answer-input'), 'zzz{enter}');
+  }
+
+  it('offers a break after the chosen number of words, then continues', async () => {
+    const user = userEvent.setup();
+    renderActive(['apple', 'banana', 'cherry'], vi.fn(), vi.fn(), 2);
+
+    await answerWrong(user);
+    await user.click(screen.getByRole('button', { name: /next word/i }));
+    await answerWrong(user);
+    await user.click(screen.getByRole('button', { name: /take a break/i }));
+
+    const pause = screen.getByTestId('test-break');
+    expect(pause).toHaveTextContent(/done 2 of 3 words — 1 to go/i);
+    expect(screen.queryByTestId('answer-input')).not.toBeInTheDocument();
+    expect(screen.getByTestId('continue-btn')).toHaveFocus();
+
+    const synth = window.speechSynthesis as unknown as { speak: ReturnType<typeof vi.fn> };
+    const before = synth.speak.mock.calls.length;
+    await user.keyboard('{Enter}');
+
+    expect(screen.queryByTestId('test-break')).not.toBeInTheDocument();
+    expect(screen.getByText(/Question 3 of 3/i)).toBeInTheDocument();
+    // Speech starts a moment later, after the previous word is cancelled.
+    await waitFor(() => expect(synth.speak.mock.calls.length).toBe(before + 1));
+    expect(screen.getByTestId('answer-input')).toHaveFocus();
+  });
+
+  it('can finish at a break with the words answered so far', async () => {
+    const user = userEvent.setup();
+    const onComplete = vi.fn();
+    renderActive(['apple', 'banana', 'cherry'], onComplete, vi.fn(), 1);
+
+    await user.type(screen.getByTestId('answer-input'), 'apple{enter}');
+    await screen.findByTestId('test-break');
+    await user.click(screen.getByTestId('finish-at-break'));
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    const session = onComplete.mock.calls[0]![0] as TestSession;
+    expect(session.status).toBe('ended-early');
+    expect(session.answers.map((a) => a.word)).toEqual(['apple']);
   });
 });
 

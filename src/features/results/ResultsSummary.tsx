@@ -5,6 +5,8 @@ import { countLabel } from '../../utils/pluralize';
 interface ResultsSummaryProps {
   session: TestSession;
   status: 'completed' | 'ended-early';
+  /** What was practised, e.g. the collection's name. */
+  context?: string;
 }
 
 function headline(accuracy: number, answered: number): string {
@@ -15,7 +17,7 @@ function headline(accuracy: number, answered: number): string {
   return 'Keep practising';
 }
 
-export function ResultsSummary({ session, status }: ResultsSummaryProps) {
+export function ResultsSummary({ session, status, context }: ResultsSummaryProps) {
   const summary = computeScore(session);
   const duration =
     session.endedAt !== undefined ? formatDuration(session.endedAt - session.startedAt) : null;
@@ -27,6 +29,7 @@ export function ResultsSummary({ session, status }: ResultsSummaryProps) {
       <div className="min-w-0 flex-1 text-center sm:text-left">
         <p className="text-sm font-medium text-slate-500">
           {status === 'ended-early' ? 'Test ended early' : 'Test complete'}
+          {context && ` · ${context}`}
         </p>
         <h1 className="mt-0.5 text-2xl font-semibold tracking-tight text-slate-900">
           {headline(summary.accuracy, summary.totalAnswered)}

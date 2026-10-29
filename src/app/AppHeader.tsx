@@ -2,7 +2,8 @@ import { SpellCheck } from 'lucide-react';
 import { useApp, type AppView } from './AppProvider';
 
 export function AppHeader() {
-  const { view, goTo, words, lastSession } = useApp();
+  const { view, goTo, activeCollection, lastSession } = useApp();
+  const wordCount = activeCollection.words.length;
   const inTest = view === 'active';
 
   return (
@@ -36,9 +37,9 @@ export function AppHeader() {
           <nav aria-label="Main" className="flex items-center gap-1">
             <NavItem target="library" current={view}>
               Words
-              {words.length > 0 && (
+              {wordCount > 0 && (
                 <span className="ml-1.5 rounded-full bg-slate-200/80 px-1.5 py-0.5 text-xs font-semibold tabular-nums text-slate-600">
-                  {words.length.toLocaleString()}
+                  {wordCount.toLocaleString()}
                 </span>
               )}
             </NavItem>

@@ -1,6 +1,5 @@
 import { normalizeAnswer } from '../../utils/normalizeAnswer';
 import { generateId } from '../../utils/ids';
-import { dedupeWords } from '../words/parseWords';
 import type { AnswerReason, TestAnswer, TestSession } from './testTypes';
 
 export function gradeAnswer(
@@ -33,6 +32,7 @@ export function createSession(params: {
   voiceName: string | null;
   speechRate: number;
   pitch: number;
+  breakEvery?: number | null;
 }): TestSession {
   return {
     id: generateId(),
@@ -47,6 +47,7 @@ export function createSession(params: {
       voiceName: params.voiceName,
       speechRate: params.speechRate,
       pitch: params.pitch,
+      breakEvery: params.breakEvery ?? null,
     },
     startedAt: Date.now(),
     status: 'active',
@@ -84,28 +85,19 @@ export function uniqueMistakeWords(session: TestSession): string[] {
 }
 
 /**
- * The running list of words to review: anything missed in this test is added,
- * anything spelled correctly is cleared. Words no longer in the library are dropped.
+ * True when a break is due once the word at `index` (zero-based) has been
+ * answered. There is never a break after the last word.
  */
-export function updateMissedWords(
-  previous: readonly string[],
-  session: TestSession,
-  library: readonly string[],
-): string[] {
-  const missedNow = new Set<string>();
-  const correctNow = new Set<string>();
-  for (const a of session.answers) {
-    const key = a.word.toLowerCase();
-    if (a.status === 'incorrect') missedNow.add(key);
-    else correctNow.add(key);
-  }
-  const inLibrary = new Set(library.map((w) => w.toLowerCase()));
-  const candidates = dedupeWords([...previous, ...uniqueMistakeWords(session)]);
-  return candidates.filter((w) => {
-    const key = w.toLowerCase();
-    if (!inLibrary.has(key)) return false;
-    return missedNow.has(key) || !correctNow.has(key);
-  });
+export function isBreakAfter(index: number, breakEvery: number | null, total: number): boolean {
+  if (breakEvery === null || breakEvery < 1) return false;
+  const answered = index + 1;
+  return answered < total && answered % breakEvery === 0;
+}
+
+/** How many breaks a test of `total` words will offer. */
+export function countBreaks(total: number, breakEvery: number | null): number {
+  if (breakEvery === null || breakEvery < 1 || total <= breakEvery) return 0;
+  return Math.ceil(total / breakEvery) - 1;
 }
 
 /** `95` → `1m 35s`, `42` → `42s`. */
